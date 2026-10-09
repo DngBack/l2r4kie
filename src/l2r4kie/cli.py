@@ -10,8 +10,11 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Callable, Sequence
+from pathlib import Path
 
 Handler = Callable[[argparse.Namespace], int]
+
+DEFAULT_MODEL = 'Qwen/Qwen2-VL-2B-Instruct'
 
 
 def _fingerprint(args: argparse.Namespace) -> int:
@@ -29,7 +32,7 @@ def _prepare(args: argparse.Namespace) -> int:
 
     from .data.prepare import prepare
 
-    report = prepare(args.data, args.output, args.seed, args.workers)
+    report = prepare(args.data, args.output, args.seed, args.workers, not args.legacy_array_descriptions)
     print(json.dumps({k: v for k, v in report.items() if k != 'forms'}, ensure_ascii=False, indent=2))
     return 0
 
@@ -65,6 +68,45 @@ def _plan_cohorts(args: argparse.Namespace) -> int:
     return 0
 
 
+def _show_input(args: argparse.Namespace) -> int:
+    """Print the prefix and branches of one document as token text."""
+    from .model.format import KevFormat, load_processor
+    from .pipelines.inspect import show_input
+
+    processor = load_processor(args.model, args.max_pixels)
+    fmt = KevFormat(processor.tokenizer, args.close)
+    print(show_input(processor, fmt, args.prepared, args.doc, args.field, args.fields, args.max_value_tokens))
+    return 0
+
+
+def _token_stats(args: argparse.Namespace) -> int:
+    """Print prompt/target token lengths of a split per field kind."""
+    import json
+
+    from transformers import AutoTokenizer
+
+    from .data.selection import Selection
+    from .model.format import KevFormat
+    from .pipelines.inspect import token_stats
+
+    fmt = KevFormat(AutoTokenizer.from_pretrained(args.model), args.close)
+    stats = token_stats(fmt, Selection(Path(args.prepared)), args.split, args.max_value_tokens, args.limit)
+    print(json.dumps(stats, indent=2))
+    return 0
+
+
+def _add_format_arguments(parser: argparse.ArgumentParser) -> None:
+    """Arguments shared by commands that encode inputs with KevFormat."""
+    parser.add_argument('--prepared', required=True, help='directory written by prepare')
+    parser.add_argument('--model', default=DEFAULT_MODEL, help=f'model (tokenizer) name (default: {DEFAULT_MODEL})')
+    parser.add_argument('--close', choices=['box_end', 'im_end'], default='box_end',
+                        help='token closing a value (default: box_end)')
+    from .model.format import DEFAULT_MAX_VALUE_TOKENS
+
+    parser.add_argument('--max-value-tokens', type=int, default=DEFAULT_MAX_VALUE_TOKENS,
+                        help=f'longest trainable target, close token included (default: {DEFAULT_MAX_VALUE_TOKENS})')
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser with one sub-parser per command.
 
@@ -91,6 +133,8 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument('--output', required=True, help='prepared directory (outside --data)')
     prepare.add_argument('--seed', type=int, default=42, help='split seed (default: 42)')
     prepare.add_argument('--workers', type=int, default=8, help='page hashing threads (default: 8)')
+    prepare.add_argument('--legacy-array-descriptions', action='store_true',
+                         help='describe array fields by their path, as the old repository did (byte-identical output)')
     prepare.set_defaults(handler=_prepare)
 
     stats = commands.add_parser('data-stats', help='summarise a prepared directory')
@@ -107,6 +151,28 @@ def build_parser() -> argparse.ArgumentParser:
     cohorts.add_argument('--set', action='append', default=[], metavar='KEY=VALUE',
                          help='override a config value, e.g. cohorts.seed=108 (repeatable)')
     cohorts.set_defaults(handler=_plan_cohorts)
+
+    show = commands.add_parser(
+        'show-input', help='print the tokens of one document as the model sees them',
+        description='Encode the shared prefix (with images) and some field branches, and show where '
+                    'the h_key / h_decide / h_value signals sit in the packed sequence.',
+    )
+    _add_format_arguments(show)
+    show.add_argument('--doc', required=True, help='document id, e.g. lift-tsr-a04__sample_000102')
+    show.add_argument('--fields', type=int, default=3, help='show the first N fields (default: 3)')
+    show.add_argument('--field', action='append', default=[], metavar='FIELD_ID',
+                      help='show this field instead (repeatable)')
+    from .model.format import DEFAULT_MAX_PIXELS
+
+    show.add_argument('--max-pixels', type=int, default=DEFAULT_MAX_PIXELS,
+                      help=f'page pixel budget of the image processor (default: {DEFAULT_MAX_PIXELS}, as r4)')
+    show.set_defaults(handler=_show_input)
+
+    lengths = commands.add_parser('token-stats', help='token lengths of prompts and targets of a split')
+    _add_format_arguments(lengths)
+    lengths.add_argument('--split', default='dev', choices=['train', 'dev', 'calibration', 'test'])
+    lengths.add_argument('--limit', type=int, help='only the first N documents')
+    lengths.set_defaults(handler=_token_stats)
 
     return parser
 

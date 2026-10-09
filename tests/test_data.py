@@ -63,6 +63,14 @@ def test_iter_branches_flattens_objects_and_keeps_arrays_atomic() -> None:
     ]
 
 
+def test_array_descriptions_come_from_the_schema() -> None:
+    label = {'rows': [{'a': 'x'}], 'tags': ['t'], 'bad': [], 'empty': 'v'}
+    descriptions = {'rows': [{'__desc': 'Các dòng', 'a': 'A'}], 'tags': ['Nhãn'], 'bad': [{'a': 'A'}], 'empty': ''}
+    assert [f.description for f in iter_branches(label, descriptions)] == ['Các dòng', 'Nhãn', '/bad', '']
+    legacy = [f.description for f in iter_branches(label, descriptions, describe_arrays=False)]
+    assert legacy == ['/rows', '/tags', '/bad', '']
+
+
 def test_document_json_round_trip_keeps_key_order() -> None:
     record = {'id': 'f__1', 'group_id': 'f__1', 'form': 'f', 'pages': ['/p.png'],
               'fields': [{'id': '/a', 'description': 'A', 'value': ['x'], 'kind': 'array'}], 'image_sha256': ['ab']}
@@ -133,7 +141,7 @@ def test_assign_split_proportions_and_seed() -> None:
 
 @pytest.mark.skipif(not (RAW_DATA.is_dir() and OLD_PREPARED.is_dir()), reason='real dataset not available')
 def test_prepare_reproduces_old_splits_byte_for_byte(tmp_path: Path) -> None:
-    prepare(RAW_DATA, tmp_path)
+    prepare(RAW_DATA, tmp_path, describe_arrays=False)
     for name in ('train.jsonl', 'dev.jsonl', 'calibration.jsonl', 'test.jsonl', 'report.json'):
         assert (tmp_path / name).read_bytes() == (OLD_PREPARED / name).read_bytes(), name
 

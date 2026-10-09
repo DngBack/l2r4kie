@@ -90,9 +90,10 @@ uv run l2r4kie fingerprint /home/jovyan/bachdx2/l2r4kie/artifacts/training-optim
 
 **Bạn kiểm tra**
 ```bash
-uv run l2r4kie prepare --data /home/jovyan/bachdx2/data/kie-all-v1 --output artifacts/data     # ~15 giây
+# So byte với bản cũ: từ step 2, mặc định lấy mô tả mảng từ schema, nên cần cờ legacy
+uv run l2r4kie prepare --data /home/jovyan/bachdx2/data/kie-all-v1 --output /tmp/data-legacy --legacy-array-descriptions   # ~15 giây
 for f in train.jsonl dev.jsonl calibration.jsonl test.jsonl report.json; do
-  cmp artifacts/data/$f /home/jovyan/bachdx2/l2r4kie/artifacts/data/$f && echo "$f giống hệt"; done
+  cmp /tmp/data-legacy/$f /home/jovyan/bachdx2/l2r4kie/artifacts/data/$f && echo "$f giống hệt"; done
 uv run l2r4kie data-stats --prepared artifacts/data
 # 9.535 / 870 / 860 / 728 tài liệu; 321.931 field; 58 form
 uv run l2r4kie plan-cohorts --config configs/cohorts/r4_winner.yaml --output artifacts/cohorts/r4_winner.json
@@ -101,13 +102,13 @@ uv run pytest -q
 ```
 
 **Kết quả đã đạt**
-- 4 split và `report.json` giống hệt bản cũ từng byte.
+- 4 split và `report.json` giống hệt bản cũ từng byte (với `--legacy-array-descriptions` từ step 2).
 - `plan-cohorts` tái tạo đúng `cohorts`, `excluded_documents`, `forms`, `source_fingerprint` của `token-review-winner/cache/cohort_plan.json`.
 - Plan v2 (`token-review-v2/cache/cohort_plan.json`, audit 347 tài liệu) load và resolve được, dùng lại ở step 6.
 
 ---
 
-## Step 2: Tiền xử lý (tài liệu → input của model, theo KevFormat)
+## Step 2: Tiền xử lý (tài liệu → input của model, theo KevFormat) ✅
 
 Đây là step đổi format. Mọi thứ biến một tài liệu thành token đều nằm ở đây.
 
@@ -115,27 +116,37 @@ uv run pytest -q
 
 | Từ (cũ) | Sang (mới) | Sửa gì |
 |---|---|---|
-| `json.dumps(value)` trong `packing` | `data/serialize.py` | **Mới:** `to_text`/`from_text`. String giữ nguyên (xuống dòng, số 0 đầu), rỗng thì rỗng, bool thành `true`/`false`, mảng object thành JSON compact |
-| (không có) | `model/markers.py` | **Mới:** tra id 4 marker có sẵn (assert không trùng token ảnh); `escape_specials` (đổi `<\|x\|>` thành `<¦x¦>` như Kev); `banned_ids` (mọi special trừ `box_end`) |
-| system prompt trong `Extractor.shared_inputs`, `packing.branch_prompt`, end `<\|im_end\|>` | `model/format.py` | **Thay bằng KevFormat:** `prefix_messages`, `branch_prompt_ids` (`object_ref` … `box_start`), `target_ids` (text + `box_end`), `signal_offsets` (`h_key=-2`, `h_decide=-1`), `parse`, `content_mask`, `kind_vector` |
-| `packing.block_mask`, `pack` | `model/packing.py` | Nhận format; lưu thêm vị trí `h_key`/`h_decide`/`h_value` trong batch; encode value qua một hàm duy nhất (sửa chỗ `add_special_tokens` dùng không thống nhất) |
+| `domain.branches` (mô tả mảng) | `data/schema.py`, `data/prepare.py` | **Sửa:** mô tả của field mảng lấy từ `__desc` của schema (trước đây cả 15.562 field mảng đều lấy path làm mô tả). `prepare --legacy-array-descriptions` tái tạo đúng từng byte file cũ |
+| `json.dumps(value)` trong `packing` | `data/serialize.py` | **Mới:** `to_text`/`from_text`. String giữ nguyên (xuống dòng, số 0 đầu), rỗng thì rỗng, bool thành `true`/`false`, mảng thành JSON compact. `None`/số thì báo lỗi (data không có) |
+| (không có) | `model/markers.py` | **Mới:** `Markers.from_tokenizer` tra id 4 marker có sẵn (151646–151649), kiểm tra không trùng token ảnh. `encode_text` tokenize với `split_special_tokens=True`: chuỗi `<\|box_end\|>` trong text thành text thường, không mất thông tin (tốt hơn escape `<¦x¦>` của Kev). `banned_ids`: mọi special token và các hàng embedding chưa train, trừ token đóng |
+| system prompt trong `Extractor.shared_inputs`, `packing.branch_prompt`, end `<\|im_end\|>` | `model/format.py` | **Thay bằng KevFormat:** prefix = system + ảnh + hướng dẫn + `<\|im_start\|>assistant` (như probe); nhánh `object_ref_start key: mô tả object_ref_end box_start`; target `text box_end`; `EncodedBranch` có `key_index`/`decide_index`/`value_index`; `parse` trả status `ok`/`truncated`/`invalid_array`; `close='im_end'` là phương án dự phòng |
+| `packing.block_mask`, `pack` | `model/packing.py` | `pack` không còn phụ thuộc model (nhận prefix, vị trí M-RoPE và các `EncodedBranch`); trả thêm vị trí `h_key`/`h_decide`/`h_value` |
+| (mới) | `pipelines/inspect.py` | `show-input`, `token-stats` |
+
+`content_mask` và `kind_vector` (feature cho confidence) dời sang step 6, khi có code dùng tới.
 
 **Kết quả**
-- CLI: `l2r4kie show-input --prepared artifacts/data --doc <id> [--fields 3]` in chuỗi token của prefix và từng nhánh, có tô marker, kèm vị trí của 3 tín hiệu.
-- Test: `tests/test_serialize.py`, `tests/test_markers.py`, `tests/test_packing.py` (block mask; tiny Qwen2-VL: đổi value nhánh A thì nhánh B Δ = 0; đổi thứ tự nhánh không đổi kết quả).
+- CLI: `l2r4kie show-input`, `l2r4kie token-stats`.
+- Test: `tests/test_serialize.py`, `tests/test_format.py`, `tests/test_packing.py` (tiny Qwen2-VL: đổi value nhánh A thì nhánh B Δ = 0; đổi thứ tự nhánh không đổi 3 tín hiệu), `tests/test_inspect.py`. Test dùng tokenizer thật tự bỏ qua nếu không có trong HF cache.
 
 **Bạn kiểm tra**
 ```bash
-uv run l2r4kie show-input --prepared artifacts/data --doc <một id bất kỳ> --fields 3
-# nhìn thấy:  ...<|object_ref_start|>/Họ tên: Họ và tên…<|object_ref_end|><|box_start|>NGUYỄN VĂN A<|box_end|>
-#            h_key @ pos …, h_decide @ pos …, h_value @ pos …
-uv run pytest tests/test_serialize.py tests/test_markers.py tests/test_packing.py -q
+export HF_HUB_OFFLINE=1
+uv run l2r4kie prepare --data /home/jovyan/bachdx2/data/kie-all-v1 --output artifacts/data   # tạo lại với mô tả mảng mới
+uv run l2r4kie show-input --prepared artifacts/data --doc lift-tsr-a04__sample_000102 --fields 3
+uv run l2r4kie token-stats --prepared artifacts/data --split dev
+uv run pytest -q
 ```
 
-**Xong khi**
-- Chuyển hai chiều text ↔ value đúng cho mọi kiểu value trong data.
-- Mô tả chứa `<|box_end|>` không tạo ra id marker.
-- Test cô lập nhánh xanh.
+**Kết quả đã đạt**
+- Data mới khác data cũ đúng ở 15.562 mô tả mảng; id, split, group và value giữ nguyên.
+- Mọi value trong data chuyển text ↔ value hai chiều đúng; không key, mô tả hay value nào sinh ra special token (`token-stats` kiểm tra trên toàn bộ train).
+- Test cô lập nhánh trên tiny model xanh.
+
+**Đã quyết định: `max_value_tokens` = 16.384** (`DEFAULT_MAX_VALUE_TOKENS` trong `model/format.py`). Trước đây mức 256 làm 48% field mảng bị bỏ khi train (train: 5.955/12.453). Target dài nhất trong data là 6.245 token, nên giờ không field nào bị bỏ. Mỗi bước 12 field cho chuỗi pack dài nhất khoảng 9.400 token (p95 5.453, đã tính prefix 2 MP), vừa với mask dày trên H200.
+Hệ quả cần theo dõi:
+- Step 3: một nhánh có thể decode tới hàng nghìn token. Cả batch phải chờ nhánh dài nhất, nên thời gian decode do mảng quyết định.
+- Step 4: log bộ nhớ đỉnh mỗi bước. Nếu thiếu bộ nhớ thì chia batch theo tổng token thay vì số field.
 
 ---
 
@@ -210,7 +221,7 @@ uv run l2r4kie infer --model Qwen/Qwen2-VL-2B-Instruct --adapter artifacts/kev-s
 |---|---|---|
 | `domain.canonical`, `correct` | `eval/comparator.py` | Thêm `text_correct` (NFC + strip, giữ hoa/thường; mảng so sau khi chuẩn hóa JSON). Giữ `json_correct` để chấm lại r4 |
 | `application.metrics` | `eval/metrics.py` | **Sửa:** không còn kéo transformers chỉ để tính số |
-| `error_kind`, bảng metrics trong `scripts/report_training_optimization.py` | `eval/errors.py`, `eval/extraction.py` | Thêm loại lỗi `coordinates`; EM micro/macro theo form, EM mảng, cắt cụt |
+| `error_kind`, bảng metrics trong `scripts/report_training_optimization.py` | `eval/errors.py`, `eval/extraction.py` | Thêm loại lỗi `coordinates`; EM micro/macro theo form, EM mảng, cắt cụt. **Thêm metric theo dòng cho mảng** (F1 dòng, tỷ lệ ô đúng), làm căn cứ cho V2-1 |
 | `application.predictions` (chế độ evaluate) | `pipelines/predict.py` | Bỏ chế độ mine/calibrate |
 | bootstrap trong report script | `eval/compare.py` | Paired bootstrap theo tài liệu giữa hai bộ prediction |
 
@@ -233,7 +244,7 @@ uv run l2r4kie compare --a <r4 dev, chấm bằng text> --b artifacts/kev-r4/eva
 
 | Cổng | Điều kiện |
 |---|---|
-| G1 | EM dev Kev ≥ EM dev r4 − 1 điểm % |
+| G1 | EM dev Kev ≥ EM dev r4 − 1 điểm %, tính trên **field scalar** (r4 chỉ decode tối đa 256 token nên gần như luôn sai mảng dài; Kev 16k thì không). EM mảng báo riêng |
 | G2 | Tỷ lệ output tọa độ < 0,5% |
 | G3 | Tỷ lệ cắt cụt ≤ r4 |
 
@@ -290,6 +301,29 @@ uv run l2r4kie audit --config configs/confidence/kev.yaml
 
 ---
 
+## Cải tiến cho version sau
+
+### V2-1: Trích mảng theo từng dòng
+
+**Vấn đề.** Hiện mỗi mảng là một nhánh atomic. Ví dụ `/BẢNG KÊ DỊCH VỤ` của `lift-tsr-a04__sample_000102` dài 4.818 token và có 3 tầng lồng nhau.
+- Sai một ô là sai cả field, nên EM mảng gần bằng 0 và không cho biết model đọc bảng tốt đến đâu.
+- Cả bảng chỉ có một `h_value`, nên chỉ review được cả bảng chứ không chỉ ra được dòng sai.
+- Lỗi lan dọc chuỗi decode dài, và nhánh dài làm chậm cả batch.
+
+**Hướng đề xuất (cách A):** sinh tuần tự từng dòng trong cùng một nhánh. Mỗi dòng có cặp `<|box_start|>…<|box_end|>` riêng, và một box rỗng đánh dấu hết bảng. Model tự quyết số dòng, nên không lộ số dòng ground truth. Mỗi dòng có `h_decide`/`h_value` riêng, cho phép confidence và review theo dòng. Sẽ thêm thành tùy chọn `array_mode: rows` của KevFormat.
+
+**Đã cân nhắc:**
+- (B) Đếm số dòng trước, rồi trích từng ô song song: song song tối đa, nhưng đếm sai là hỏng cả bảng, và phức tạp với mảng lồng nhau.
+- (C) Hỏi theo chỉ số tới N_max: lãng phí nhánh, và dễ bịa dòng.
+
+**Điều kiện bắt đầu:** Kev atomic đã xong step 3–6 và có mốc so sánh với r4. Metric theo dòng của step 5 (F1 dòng, tỷ lệ ô đúng) cho thấy mảng là điểm yếu đáng đầu tư.
+
+**Ảnh hưởng:**
+- Step 2: target gồm nhiều box.
+- Step 3: decode nhiều box trong một nhánh.
+- Step 5: căn dòng dự đoán với dòng thật để chấm.
+- Step 6: confidence và policy ở mức dòng.
+
 ## Không chuyển
 
 - **Code:** `application.predictions(calibrate/mine)`, `domain.negative`, synthetic negatives/mining/ranking/`confidence_only`, `FeatureHead`, `review_optimization.optimize` (phần G2), candidate "head có sẵn".
@@ -311,7 +345,7 @@ uv run l2r4kie audit --config configs/confidence/kev.yaml
 
 - [x] 0 Nền móng
 - [x] 1 Dữ liệu
-- [ ] 2 Tiền xử lý (KevFormat)
+- [x] 2 Tiền xử lý (KevFormat)
 - [ ] 3 Infer
 - [ ] 4 Train (smoke → chạy thật)
 - [ ] 5 Eval (cổng G1–G3)

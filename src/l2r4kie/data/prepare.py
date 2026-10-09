@@ -9,8 +9,9 @@ Raw layout (read-only)::
 
 Splitting is leak-proof against duplicated scans: pages are hashed by
 content, documents sharing any page are merged into one group, and the split
-is a hash of the group. The output is byte-identical to the old repository's
-``data.prepare`` for the same input and seed.
+is a hash of the group. With ``describe_arrays=False`` the output is
+byte-identical to the old repository's ``data.prepare`` for the same input and
+seed; the default differs only in the descriptions of array fields.
 """
 
 from __future__ import annotations
@@ -106,7 +107,7 @@ def group_duplicates(manifest: Sequence[Mapping[str, Any]], page_hashes: Mapping
     return [min(members[find(i)]) for i in range(len(manifest))]
 
 
-def load_fields(root: Path, row: Mapping[str, Any]) -> list[FieldSpec]:
+def load_fields(root: Path, row: Mapping[str, Any], describe_arrays: bool = True) -> list[FieldSpec]:
     """Read a document's label and flatten it into extraction branches.
 
     Fields listed under the label's ``unprinted`` key are dropped rather than
@@ -120,7 +121,7 @@ def load_fields(root: Path, row: Mapping[str, Any]) -> list[FieldSpec]:
     label = json.loads((root / 'kie-labels' / row['fields']).read_text())
     description_file = root / 'schemas' / f"{row['form'].removeprefix('lift-')}.descriptions.json"
     descriptions = json.loads(description_file.read_text()) if description_file.exists() else {}
-    fields = list(iter_branches(label['fields'], descriptions))
+    fields = list(iter_branches(label['fields'], descriptions, describe_arrays=describe_arrays))
     unprinted = label.get('unprinted', [])
     if isinstance(unprinted, list):
         fields = [f for f in fields if f.id not in unprinted]
@@ -129,7 +130,8 @@ def load_fields(root: Path, row: Mapping[str, Any]) -> list[FieldSpec]:
     return fields
 
 
-def prepare(root: PathLike, output: PathLike, seed: int = 42, workers: int = 8) -> dict[str, Any]:
+def prepare(root: PathLike, output: PathLike, seed: int = 42, workers: int = 8,
+            describe_arrays: bool = True) -> dict[str, Any]:
     """Build ``<output>/{train,dev,calibration,test}.jsonl`` and ``report.json``.
 
     Documents with a missing page, an unreadable label or no usable field are
@@ -141,6 +143,8 @@ def prepare(root: PathLike, output: PathLike, seed: int = 42, workers: int = 8) 
         output: Destination directory; must lie outside ``root``.
         seed: Split seed. ``42`` reproduces the published splits.
         workers: Threads for hashing page images.
+        describe_arrays: Take array descriptions from the schema. ``False``
+            reproduces the old repository's splits byte for byte.
 
     Returns:
         The report, also written to ``<output>/report.json``.
@@ -168,7 +172,7 @@ def prepare(root: PathLike, output: PathLike, seed: int = 42, workers: int = 8) 
             pages = [images / name for name in row['pages']]
             if not pages or not all(page.is_file() for page in pages):
                 raise ValueError('Missing image')
-            fields = load_fields(root, row)
+            fields = load_fields(root, row, describe_arrays)
             split = assign_split(group_key, seed)
             records[split].append(Document(
                 id=doc_id, group_id=group_key, form=row['form'],

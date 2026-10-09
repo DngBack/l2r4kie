@@ -21,3 +21,14 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     skip = pytest.mark.skip(reason='CUDA is not available')
     for item in gpu_items:
         item.add_marker(skip)
+
+
+@pytest.fixture(scope='session')
+def qwen_tokenizer():  # noqa: ANN201 - transformers type
+    """The real Qwen2-VL tokenizer from the local HF cache; skips if it is not cached."""
+    from transformers import AutoTokenizer
+
+    try:
+        return AutoTokenizer.from_pretrained('Qwen/Qwen2-VL-2B-Instruct', local_files_only=True)
+    except OSError:
+        pytest.skip('Qwen2-VL tokenizer not in the local Hugging Face cache')

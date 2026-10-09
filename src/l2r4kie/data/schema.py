@@ -23,15 +23,35 @@ def escape_pointer(key: str) -> str:
     return key.replace('~', '~0').replace('/', '~1')
 
 
-def iter_branches(value: Any, description: Any = None, path: str = '') -> Iterator[FieldSpec]:
+def array_description(description: Any) -> str | None:
+    """Return the description of an array field from its schema entry, if any.
+
+    Schemas describe an array by a one-element list holding either the item
+    description (``["..."]``, arrays of scalars) or an item object whose
+    ``__desc`` describes the array (``[{"__desc": "...", ...}]``).
+    """
+    if isinstance(description, list) and len(description) == 1:
+        item = description[0]
+        if isinstance(item, str):
+            return item
+        if isinstance(item, dict) and isinstance(item.get('__desc'), str):
+            return item['__desc']
+    return None
+
+
+def iter_branches(value: Any, description: Any = None, path: str = '',
+                  describe_arrays: bool = True) -> Iterator[FieldSpec]:
     """Yield one branch per leaf of ``value``, depth-first in key order.
 
     Args:
         value: Label value; objects are recursed into, anything else is a leaf.
         description: Description tree parallel to ``value``. A string at a
-            leaf is used as that field's description; anything else (missing,
-            or a mapping where a leaf was expected) falls back to the path.
+            leaf is used as that field's description; for an array, see
+            :func:`array_description`. Anything else falls back to the path.
         path: Pointer prefix of ``value`` (``''`` at the root).
+        describe_arrays: Read array descriptions from the schema. ``False``
+            reproduces the old repository, where every array field (all
+            15,562 of them) silently got its path as description.
 
     Yields:
         Fields with ids such as ``'/a~1b/x~0y'``.
@@ -39,11 +59,10 @@ def iter_branches(value: Any, description: Any = None, path: str = '') -> Iterat
     if isinstance(value, dict):
         for key, item in value.items():
             child = description.get(key) if isinstance(description, dict) else None
-            yield from iter_branches(item, child, f'{path}/{escape_pointer(key)}')
-    else:
-        yield FieldSpec(
-            id=path,
-            description=description if isinstance(description, str) else path,
-            value=value,
-            kind='array' if isinstance(value, list) else 'scalar',
-        )
+            yield from iter_branches(item, child, f'{path}/{escape_pointer(key)}', describe_arrays)
+        return
+    text = description if isinstance(description, str) else None
+    if text is None and describe_arrays and isinstance(value, list):
+        text = array_description(description)
+    yield FieldSpec(id=path, description=path if text is None else text, value=value,
+                    kind='array' if isinstance(value, list) else 'scalar')
