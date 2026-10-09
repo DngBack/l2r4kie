@@ -162,18 +162,35 @@ Hệ quả cần theo dõi:
 | `scripts/audit_isolation.py` | `scripts/audit_isolation.py` | Chuyển sang API mới |
 
 **Kết quả**
-- CLI: `l2r4kie infer --model Qwen/Qwen2-VL-2B-Instruct [--adapter <dir>] --request req.json --output resp.json`.
-- Test: `tests/test_decode.py` (tiny model): decode dừng ở `box_end`; không sinh token bị cấm; `h_value` khi decode khớp `h_value` khi teacher forcing qua packing (FP32, Δ ≤ 1e-5); vision forward đúng 1 lần.
-
-**Bạn kiểm tra**
-```bash
-uv run l2r4kie infer --model Qwen/Qwen2-VL-2B-Instruct --request examples/request.json --output /tmp/resp.json
-cat /tmp/resp.json
-# model CHƯA train: value thường là tọa độ "(684,10),(996,101)". Đây là kết quả đúng mong đợi
-# (prior grounding, xem notes/marker_selection.md). Điều cần kiểm ở đây là cấu trúc:
-# mọi field có status, không có special token lạc, mỗi tài liệu 1 lần vision forward.
-uv run python scripts/audit_isolation.py --model Qwen/Qwen2-VL-2B-Instruct --doc <id>
-```
+- CLI: `l2r4kie infer [--model …] [--adapter <dir>] --request req.json --output resp.json [--device cuda:0] [--precision bfloat16|float32] [--max-branches 64] [--close box_end|im_end]`.
+- API:
+  - `Extractor.load(ExtractorConfig, adapter)` trong `model/extractor.py`. `adapter` có thể là thư mục adapter hoặc checkpoint cũ có `adapter/`.
+  - `extract(extractor, pages, requests, trace=False)` và `decode_prefix(...)` trong `model/decode.py`.
+  - `FieldRequest(id, description, kind)` trong `data/types.py`.
+- `DecodeResult(field_id, value, text, status, signals, trace)`:
+  - `Signals(key, decide, value)` là hidden lớp cuối dạng FP32 trên CPU; `value` là `None` khi bị cắt cụt.
+  - `Trace(tokens, hidden, stats)` gồm token sinh ra (có cả close), hidden sau mỗi token và 4 thống kê trước token (logprob, entropy chuẩn hóa, margin xác suất, margin logit), tính trên logits đã mask. Phần này để dành cho step 6.
+- Test:
+  - `tests/test_decode.py` dùng tiny Qwen2-VL vocab đầy đủ, tokenizer/processor thật, CPU FP32, 6 test:
+    - Không sinh token bị cấm, kể cả khi các hàng bị cấm thắng argmax thô.
+    - Dừng ở `box_end`.
+    - Báo lỗi khi trùng id.
+    - Sau khi overfit 3 field: decode ra đúng value. `h_key`, `h_decide`, `h_value` và hidden của từng token khớp teacher forcing qua `pack` (Δ ≤ 1e-5), cả khi chia 2 chunk.
+    - Chia chunk không đổi kết quả.
+    - Request 2 trang ảnh chỉ chạy vision encoder 1 lần.
+  - `tests/test_infer.py` kiểm tra validate request và schema response.
+- Chạy thật, base model chưa train, `examples/request.json` (CCCD 2 trang, 12 field), bf16 trên GPU dùng chung: 12/12 `ok`, value là tọa độ `"(295,434),(526,492)"` đúng như dự kiến, không có special token lạc. Mất 223 s tính cả load, vì GPU đang chạy 99% cho việc khác.
+- Audit isolation chạy trên `lift-tsr-a04__sample_000102` với 4 field, FP32 trên CPU (`--max-pixels 524288`), mất 93 s. Kết quả **pass**:
+  - Hidden của nhánh khác Δ = **0.0**.
+  - Đảo thứ tự nhánh: Δ 6.1e-5.
+  - Decode có cache so với packing: Δ ≤ 1.25e-4. Lớn hơn mức 1e-5 trên tiny model vì thứ tự cộng dồn trong chuỗi dài khác nhau; vẫn trong ngưỡng 1e-3.
+  - Vision forward đúng 1 lần.
+  - Chia chunk cho kết quả giống hệt.
+- Audit bf16 trên GPU (`cuda:1`, ảnh 2 MP, cùng tài liệu): **pass**.
+  - Hidden của nhánh khác Δ = **0.0**; vision forward 1 lần.
+  - Δ tuyệt đối 0,8–1,5 nhưng không có ý nghĩa: hidden lớp cuối có giá trị cỡ hàng trăm, ở mức đó 1 ulp của bf16 đã là 1. Vì vậy với bf16, script đánh giá bằng L2 tương đối (≤ 5%).
+  - Đảo thứ tự nhánh lệch 2,0%. Decode có cache so với packing lệch 2,2–2,5%, cùng cỡ với nhiễu khi đảo thứ tự nên không phải lỗi logic. Ở FP32 sai lệch chỉ 1e-4.
+  - Chia chunk làm đổi value sinh ra ở bf16, khớp với README cũ (7/64 field). Ở FP32 thì giống hệt.
 
 **Xong khi:** test decode xanh; `infer` chạy được trên GPU với request nhiều trang và nhiều field; audit isolation báo hidden của nhánh khác Δ = 0.
 
@@ -346,7 +363,7 @@ uv run l2r4kie audit --config configs/confidence/kev.yaml
 - [x] 0 Nền móng
 - [x] 1 Dữ liệu
 - [x] 2 Tiền xử lý (KevFormat)
-- [ ] 3 Infer
+- [x] 3 Infer
 - [ ] 4 Train (smoke → chạy thật)
 - [ ] 5 Eval (cổng G1–G3)
 - [ ] 6 Confidence (cổng G4)

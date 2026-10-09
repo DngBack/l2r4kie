@@ -1,0 +1,56 @@
+{
+  "pages": [
+    "/home/jovyan/scratch/home-migrate/bachdx2/data/kie-all-v1/images/lift-can-cuoc-2024__sample_000331_page_0001.png",
+    "/home/jovyan/scratch/home-migrate/bachdx2/data/kie-all-v1/images/lift-can-cuoc-2024__sample_000331_page_0002.png"
+  ],
+  "fields": [
+    {
+      "id": "/Số định danh cá nhân ~1 Personal identification number",
+      "description": "Số định danh cá nhân, gồm 12 chữ số | Personal ID number, 12 digits"
+    },
+    {
+      "id": "/Họ, chữ đệm và tên ~1 Full name",
+      "description": "Họ tên người được cấp thẻ | Card holder's full name"
+    },
+    {
+      "id": "/Ngày, tháng, năm sinh ~1 Date of birth",
+      "description": "Ngày sinh. Định dạng dd/mm/yyyy | Date of birth. Format dd/mm/yyyy"
+    },
+    {
+      "id": "/Giới tính ~1 Sex",
+      "description": "Giới tính, chỉ một trong các phương án: Nam, Nữ | Sex, one of Nam, Nữ"
+    },
+    {
+      "id": "/Quốc tịch ~1 Nationality",
+      "description": "Quốc tịch của người được cấp thẻ | Card holder's nationality"
+    },
+    {
+      "id": "/Nơi cư trú ~1 Place of residence",
+      "description": "Nơi cư trú của người được cấp thẻ | Card holder's place of residence"
+    },
+    {
+      "id": "/Nơi đăng ký khai sinh ~1 Place of birth",
+      "description": "Nơi đăng ký khai sinh, khác nơi cư trú | Place of birth registration, not the residence"
+    },
+    {
+      "id": "/Ngày, tháng, năm cấp ~1 Date of issue",
+      "description": "Ngày cấp thẻ. Định dạng dd/mm/yyyy | Date of issue. Format dd/mm/yyyy"
+    },
+    {
+      "id": "/Ngày, tháng, năm hết hạn ~1 Date of expiry",
+      "description": "Ngày hết hạn, định dạng dd/mm/yyyy hoặc 'Không thời hạn' | Expiry date, dd/mm/yyyy or 'Không thời hạn'"
+    },
+    {
+      "id": "/MRZ/Dòng 1 ~1 Line 1",
+      "description": "Dòng MRZ thứ nhất, giữ nguyên ký tự '<' | First MRZ line, keeping '<' fillers"
+    },
+    {
+      "id": "/MRZ/Dòng 2 ~1 Line 2",
+      "description": "Dòng MRZ thứ hai, giữ nguyên ký tự '<' | Second MRZ line, keeping '<' fillers"
+    },
+    {
+      "id": "/MRZ/Dòng 3 ~1 Line 3",
+      "description": "Dòng MRZ thứ ba, giữ nguyên ký tự '<' | Third MRZ line, keeping '<' fillers"
+    }
+  ]
+}

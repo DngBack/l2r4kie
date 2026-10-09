@@ -199,8 +199,12 @@ class KevFormat:
             return ParsedValue(text, None, 'invalid_array')
 
 
-def load_processor(model_name: str, max_pixels: int = DEFAULT_MAX_PIXELS) -> Any:
-    """Load the Qwen2-VL processor with the page pixel bounds used in training."""
+def load_processor(model_name: str, max_pixels: int = DEFAULT_MAX_PIXELS, **kwargs: Any) -> Any:
+    """Load the Qwen2-VL processor with the page pixel bounds used in training.
+
+    Extra keyword arguments (e.g. ``local_files_only``) go to ``from_pretrained``.
+    """
     from transformers import AutoProcessor
 
-    return AutoProcessor.from_pretrained(model_name, min_pixels=MIN_PIXELS, max_pixels=max_pixels, use_fast=False)
+    return AutoProcessor.from_pretrained(model_name, min_pixels=MIN_PIXELS, max_pixels=max_pixels, use_fast=False,
+                                         **kwargs)

@@ -95,6 +95,24 @@ def _token_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def _infer(args: argparse.Namespace) -> int:
+    """Run one request through the model and write the response JSON."""
+    import json
+
+    from .model.extractor import Extractor, ExtractorConfig
+    from .pipelines.infer import infer_file
+
+    config = ExtractorConfig(model=args.model, device=args.device, precision=args.precision,
+                             max_pixels=args.max_pixels, max_value_tokens=args.max_value_tokens,
+                             max_branches=args.max_branches, close=args.close)
+    response = infer_file(Extractor.load(config, args.adapter), args.request, args.output)
+    counts: dict[str, int] = {}
+    for status in response['status'].values():
+        counts[status] = counts.get(status, 0) + 1
+    print(json.dumps({'output': str(args.output), 'fields': len(response['status']), 'status': counts}))
+    return 0
+
+
 def _add_format_arguments(parser: argparse.ArgumentParser) -> None:
     """Arguments shared by commands that encode inputs with KevFormat."""
     parser.add_argument('--prepared', required=True, help='directory written by prepare')
@@ -117,6 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
         description='Learning to Reject for KIE: branch-isolated extraction with a learned review policy.',
     )
     commands = parser.add_subparsers(dest='command', required=True, metavar='<command>')
+    from .model.format import DEFAULT_MAX_PIXELS, DEFAULT_MAX_VALUE_TOKENS
 
     fingerprint = commands.add_parser(
         'fingerprint', help='print the content fingerprint of extractor checkpoints',
@@ -162,8 +181,6 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument('--fields', type=int, default=3, help='show the first N fields (default: 3)')
     show.add_argument('--field', action='append', default=[], metavar='FIELD_ID',
                       help='show this field instead (repeatable)')
-    from .model.format import DEFAULT_MAX_PIXELS
-
     show.add_argument('--max-pixels', type=int, default=DEFAULT_MAX_PIXELS,
                       help=f'page pixel budget of the image processor (default: {DEFAULT_MAX_PIXELS}, as r4)')
     show.set_defaults(handler=_show_input)
@@ -173,6 +190,29 @@ def build_parser() -> argparse.ArgumentParser:
     lengths.add_argument('--split', default='dev', choices=['train', 'dev', 'calibration', 'test'])
     lengths.add_argument('--limit', type=int, help='only the first N documents')
     lengths.set_defaults(handler=_token_stats)
+
+    run = commands.add_parser(
+        'infer', help='extract the fields of one document request',
+        description='Encode the pages once, decode every field in its own isolated branch, and write '
+                    '{"result", "confidence", "status", "calibrated"} JSON.',
+    )
+    run.add_argument('--model', default=DEFAULT_MODEL, help=f'base model (default: {DEFAULT_MODEL})')
+    run.add_argument('--adapter', help='LoRA adapter directory, or a checkpoint containing adapter/ '
+                                       '(default: zero-shot base model)')
+    run.add_argument('--request', required=True, help='request JSON {"pages": [...], "fields": [...]}')
+    run.add_argument('--output', required=True, help='response JSON to write')
+    run.add_argument('--device', default='cuda:0', help='torch device (default: cuda:0)')
+    run.add_argument('--precision', choices=['bfloat16', 'float32'], default='bfloat16',
+                     help='bfloat16 (default) or float32 (bit-stable across batch layouts, slower)')
+    run.add_argument('--max-pixels', type=int, default=DEFAULT_MAX_PIXELS,
+                     help=f'page pixel budget (default: {DEFAULT_MAX_PIXELS})')
+    run.add_argument('--max-value-tokens', type=int, default=DEFAULT_MAX_VALUE_TOKENS,
+                     help=f'decode budget per field, close token included (default: {DEFAULT_MAX_VALUE_TOKENS})')
+    run.add_argument('--max-branches', type=int, default=64,
+                     help='fields decoded together; bounds KV-cache memory (default: 64)')
+    run.add_argument('--close', choices=['box_end', 'im_end'], default='box_end',
+                     help='token closing a value (default: box_end)')
+    run.set_defaults(handler=_infer)
 
     return parser
 

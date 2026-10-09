@@ -85,3 +85,24 @@ class Document:
         """Build from one line of a prepared split."""
         return cls(record['id'], record['group_id'], record['form'], tuple(record['pages']),
                    tuple(FieldSpec.from_json(f) for f in record['fields']), tuple(record['image_sha256']))
+
+
+@dataclass(frozen=True, slots=True)
+class FieldRequest:
+    """A field to extract at inference time (no ground truth).
+
+    Attributes:
+        id: Caller's field key, returned unchanged in the response.
+        description: What to extract; defaults to the id.
+        kind: ``'array'`` parses the generated text as a JSON array;
+            ``'scalar'`` (default) returns text, or a bool for ``true``/``false``.
+    """
+
+    id: str
+    description: str = ''
+    kind: FieldKind = 'scalar'
+
+    @classmethod
+    def from_field(cls, field: FieldSpec) -> FieldRequest:
+        """The request a labelled field corresponds to (for evaluation)."""
+        return cls(field.id, field.description, field.kind)
