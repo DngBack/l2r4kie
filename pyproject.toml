@@ -4,12 +4,24 @@ version = "0.1.0"
 description = "Learning to Reject for KIE: branch-isolated extraction with a learned review policy"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "accelerate>=1.15.0",
+    "numpy>=2.4",
+    "peft==0.18.1",
+    "pillow>=12.2",
+    "pyyaml>=6.0",
+    "torch==2.12.0",
+    "torchvision==0.27.0",
+    "transformers==4.57.6",
+]
 
 [dependency-groups]
 dev = [
     "pytest>=9.1",
 ]
+
+[project.scripts]
+l2r4kie = "l2r4kie.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -20,3 +32,6 @@ packages = ["src/l2r4kie"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "gpu: needs a CUDA device and the real model weights; skipped automatically without CUDA",
+]
