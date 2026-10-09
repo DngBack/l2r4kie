@@ -1,0 +1,30 @@
+# Smoke run of KevFormat training: 8 documents, 30 steps, ~10 min on one GPU.
+# Checks that loss falls and that the model stops writing box coordinates on
+# the documents it has seen (monitor.jsonl: coordinate_rate -> ~0).
+model: Qwen/Qwen2-VL-2B-Instruct
+output: artifacts/kev-smoke
+device: cuda:0
+precision: bfloat16
+seed: 42
+selection:
+  prepared: artifacts/data
+  seed: 42
+  holdout_percent: 15
+  balanced_forms: true
+train_documents: 8
+format:
+  close: box_end
+  max_value_tokens: 16384
+  max_pixels: 1048576        # half of r4's budget: a smoke run, not a result
+steps: 30
+fields_per_document: 8
+lr: 0.0001
+gradient_checkpointing: true
+log_every: 5
+save_every: 10
+monitor:
+  every: 10
+  splits: [train, dev]
+  documents: 4
+  fields: 8
+  max_value_tokens: 256

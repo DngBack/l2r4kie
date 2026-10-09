@@ -1,0 +1,33 @@
+# KevFormat extractor with r4's recipe (old configs/experiments/r4_2m_12f.yaml):
+# 2.1 MP pages, 12 fields per document, 1000 steps, LoRA r16/alpha32, lr 1e-4,
+# seed 42, 15% train hold-out (reserve for the confidence head), balanced forms.
+# Differences from r4, all intended: KevFormat (markers, text values), array
+# descriptions, max_value_tokens 16384 instead of 256 (no field dropped), no
+# confidence head or synthetic negatives in the loss.
+model: Qwen/Qwen2-VL-2B-Instruct
+output: artifacts/kev-r4
+device: cuda:0
+precision: bfloat16
+seed: 42
+selection:
+  prepared: artifacts/data
+  seed: 42
+  holdout_percent: 15
+  balanced_forms: true
+format:
+  close: box_end           # fallback: --set format.close=im_end
+  max_value_tokens: 16384
+  max_pixels: 2097152
+steps: 1000
+fields_per_document: 12
+lr: 0.0001
+loss_weighting: token      # as r4; 'field' is an ablation
+gradient_checkpointing: true
+log_every: 50
+save_every: 100
+monitor:
+  every: 100
+  splits: [train, dev]
+  documents: 8
+  fields: 12
+  max_value_tokens: 512

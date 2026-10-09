@@ -32,3 +32,14 @@ def qwen_tokenizer():  # noqa: ANN201 - transformers type
         return AutoTokenizer.from_pretrained('Qwen/Qwen2-VL-2B-Instruct', local_files_only=True)
     except OSError:
         pytest.skip('Qwen2-VL tokenizer not in the local Hugging Face cache')
+
+
+@pytest.fixture(scope='session')
+def qwen_processor():  # noqa: ANN201 - transformers type
+    """The real Qwen2-VL processor with a small page budget; skips if it is not cached."""
+    from l2r4kie.model.format import load_processor
+
+    try:
+        return load_processor('Qwen/Qwen2-VL-2B-Instruct', max_pixels=56 * 56 * 4, local_files_only=True)
+    except OSError:
+        pytest.skip('Qwen2-VL processor not in the local Hugging Face cache')

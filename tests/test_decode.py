@@ -10,37 +10,18 @@ from pathlib import Path
 
 import pytest
 import torch
-from transformers import Qwen2VLConfig, Qwen2VLForConditionalGeneration
+from tiny import HIDDEN, VOCAB, tiny_model
 
 from l2r4kie.data.types import FieldRequest, FieldSpec
 from l2r4kie.model.decode import TOKEN_STATS, DecodeResult, decode_prefix, extract
 from l2r4kie.model.extractor import Extractor, ExtractorConfig
-from l2r4kie.model.format import EncodedBranch, KevFormat, load_processor
+from l2r4kie.model.format import EncodedBranch, KevFormat
 from l2r4kie.model.packing import Packed, pack, prefix_positions
-
-VOCAB = 151_936
-
-
-def tiny_model(seed: int = 0) -> Qwen2VLForConditionalGeneration:
-    """Random 2-layer Qwen2-VL with the real vocabulary size and a 1-block vision tower."""
-    torch.manual_seed(seed)
-    config = Qwen2VLConfig(
-        text_config={'vocab_size': VOCAB, 'hidden_size': 32, 'intermediate_size': 64, 'num_hidden_layers': 2,
-                     'num_attention_heads': 4, 'num_key_value_heads': 2,
-                     'rope_scaling': {'type': 'mrope', 'mrope_section': [1, 1, 2]}},
-        vision_config={'depth': 1, 'embed_dim': 32, 'hidden_size': 32, 'num_heads': 4, 'patch_size': 14,
-                       'spatial_merge_size': 2, 'in_channels': 3})
-    config._attn_implementation = 'sdpa'
-    return Qwen2VLForConditionalGeneration(config).eval()
 
 
 @pytest.fixture(scope='module')
-def processor():  # noqa: ANN201 - transformers type
-    """Real Qwen2-VL processor with a small page budget; skips if not cached."""
-    try:
-        return load_processor('Qwen/Qwen2-VL-2B-Instruct', max_pixels=56 * 56 * 4, local_files_only=True)
-    except OSError:
-        pytest.skip('Qwen2-VL processor not in the local Hugging Face cache')
+def processor(qwen_processor):  # noqa: ANN001, ANN201
+    return qwen_processor
 
 
 def make_extractor(processor, model: torch.nn.Module | None = None, **config) -> Extractor:  # noqa: ANN001
@@ -92,7 +73,7 @@ def test_stops_at_close_marker(processor) -> None:  # noqa: ANN001
     extractor = make_extractor(processor)
     close = extractor.format.markers.value_close
     # A separate (untied) head whose bias makes the close marker always win: every value is empty.
-    head = torch.nn.Linear(32, VOCAB, bias=True)
+    head = torch.nn.Linear(HIDDEN, VOCAB, bias=True)
     torch.nn.init.zeros_(head.weight)
     torch.nn.init.zeros_(head.bias)
     with torch.no_grad():
@@ -174,4 +155,4 @@ def test_extract_runs_the_vision_encoder_once(processor, tmp_path: Path) -> None
     results = extract(extractor, pages, requests(), max_value_tokens=4)
     assert len(calls) == 1
     assert [r.field_id for r in results] == [r.id for r in requests()]
-    assert all(r.status == 'truncated' and r.signals.key.shape == (32,) for r in results)
+    assert all(r.status == 'truncated' and r.signals.key.shape == (HIDDEN,) for r in results)

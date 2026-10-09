@@ -113,6 +113,19 @@ def _infer(args: argparse.Namespace) -> int:
     return 0
 
 
+def _train(args: argparse.Namespace) -> int:
+    """Train (or resume) an extractor adapter from a run config."""
+    import json
+
+    from .train.config import TrainConfig
+    from .train.trainer import train
+    from .utils.config import load_config
+
+    summary = train(TrainConfig.from_dict(load_config(args.config, args.set)))
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _add_format_arguments(parser: argparse.ArgumentParser) -> None:
     """Arguments shared by commands that encode inputs with KevFormat."""
     parser.add_argument('--prepared', required=True, help='directory written by prepare')
@@ -213,6 +226,16 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument('--close', choices=['box_end', 'im_end'], default='box_end',
                      help='token closing a value (default: box_end)')
     run.set_defaults(handler=_infer)
+
+    fit = commands.add_parser(
+        'train', help='train a LoRA extractor adapter (resumes from the latest snapshot)',
+        description='Branch-packed teacher forcing with cross-entropy on value tokens and the close marker. '
+                    'Writes adapter/, train.jsonl, monitor.jsonl and snapshots/ to the config\'s output.',
+    )
+    fit.add_argument('--config', required=True, help='run config, e.g. configs/extractor/kev_smoke.yaml')
+    fit.add_argument('--set', action='append', default=[], metavar='KEY=VALUE',
+                     help='override a config value, e.g. steps=50 or format.close=im_end (repeatable)')
+    fit.set_defaults(handler=_train)
 
     return parser
 

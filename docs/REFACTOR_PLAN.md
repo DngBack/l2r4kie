@@ -210,15 +210,57 @@ Hệ quả cần theo dõi:
 | `configs/experiments/r4_2m_12f.yaml` | `configs/extractor/kev_smoke.yaml`, `kev_r4.yaml` | Cấu hình smoke (8 tài liệu, 30 step) và cấu hình thật giống r4 (2,1 MP, 12 field, 1000 step, seed 42) |
 
 **Kết quả**
-- CLI: `l2r4kie train --config configs/extractor/kev_smoke.yaml [--set steps=50]`.
-- Test: `tests/test_training.py` (resume khôi phục optimizer/scheduler/RNG; accumulation lẻ; khóa config lạ; khi bật K6 chỉ 4 hàng embedding marker thay đổi).
+- CLI: `l2r4kie train --config configs/extractor/kev_smoke.yaml [--set steps=50] [--set format.close=im_end]`. Lệnh tự resume từ snapshot mới nhất. Nếu thư mục đã có run mà không có snapshot thì báo lỗi, không ghi đè.
+- `train/config.py`:
+  - `TrainConfig` gồm các mục con `selection`, `format`, `lora`, `monitor`. Khóa lạ ở bất kỳ cấp nào đều báo lỗi.
+  - Khi resume, cho phép khác nhau ở `device`, `output`, `log_every`, `save_every`, `monitor`. Khác ở khóa khác thì báo lỗi và nêu rõ khóa nào khác.
+- `train/losses.py`:
+  - Chỉ còn CE trên value và `box_end`.
+  - Phép chiếu ra từ vựng (151.936 cột) tính theo từng khúc 1.024 vị trí, có checkpoint. Lý do: với 16k token, logits FP32 của cả một bước có thể tốn khoảng 6 GB.
+  - Log thêm `token_accuracy` và `close_accuracy` (tỷ lệ đóng value đúng chỗ).
+  - `loss_weighting`: `token` là mặc định, giống r4. `field` là ablation, cho mỗi field trọng số như nhau.
+- **Lưu ý về `loss_weighting: token`:** giờ mảng dài không còn bị cắt ở 256 token, nên một mảng vài nghìn token sẽ lấn át các field scalar trong cùng bước. Nếu ở step 5, EM của scalar kém r4 thì thử `field`.
+- `train/trainer.py`:
+  - Gồm `fields_for(step)`, `train_step`, `monitor`, `run`, `summary`.
+  - Optimizer chỉ nhận LoRA (cùng marker nếu bật K6). Không còn head, không còn `negative()`.
+  - `train.jsonl` log thêm `peak_gib`. `monitor.jsonl` ghi EM, `coordinate_rate`, `truncated_rate` cho tài liệu train đã thấy và dev, đo ở step 0 rồi mỗi `monitor.every` step.
+- `train/snapshots.py`: giữ cơ chế an toàn cũ. Một snapshot gồm `adapter/`, `config.json` và `training_state.pt`.
+- `eval/comparator.py` (`canonical`, `correct`) và `eval/errors.py` (`is_coordinates`) được tạo sớm vì monitor cần dùng. Step 5 sẽ mở rộng tiếp.
+- Config: `configs/extractor/kev_smoke.yaml` (8 tài liệu, 30 step, 1 MP, 8 field) và `kev_r4.yaml` (công thức r4: 2,1 MP, 12 field, 1.000 step, lr 1e-4, seed 42).
+- `tests/test_training.py`, 13 test trên tiny model:
+  - Khóa lạ ở mọi cấp đều báo lỗi.
+  - Config ghi ra rồi đọc lại cho kết quả như cũ.
+  - CE chia khúc bằng CE không chia khúc (cả loss lẫn gradient).
+  - Trọng số `token` và `field` đúng.
+  - Dừng ở step 3 (snapshot ở step 2) rồi resume cho loss từng step và trọng số adapter **giống hệt** khi chạy liền.
+  - Có run cũ mà không có snapshot thì từ chối; đổi config khi resume thì từ chối.
+  - Một lần accumulation dở dang bằng một update bình thường.
+  - Với K6 trên model tied (như Qwen2-VL-2B), chỉ 4 hàng marker thay đổi, ở cả embedding lẫn cột logits.
+  - Monitor ghi đúng log.
+- K6, phát hiện thêm: PEFT 0.18.1 luôn bọc `lm_head` dùng chung delta với embedding, kể cả khi model không tied. Vì vậy K6 chỉ đúng với model tied. Qwen2-VL-2B là model tied.
+- **Smoke đã chạy** (`kev_smoke.yaml`, bf16 trên `cuda:1` dùng chung với việc khác, 30 step, 511 s, đỉnh 13,8 GB, chuỗi dài nhất 6.931 token):
+
+  | step | loss | close_accuracy | monitor train (EM / tọa độ / cắt cụt) | monitor dev (EM / tọa độ / cắt cụt) |
+  |---|---|---|---|---|
+  | 0 | – | – | 0% / 100% / 0% | 0% / 100% / 0% |
+  | 10 | 0,67 | 0,0 | 0% / 3% / 94% | 0% / 12,5% / 88% |
+  | 20 | 0,62 | 0,875 | 28% / 0% / 0% | 41% / 0% / 0% |
+  | 30 | 0,32 | 1,0 | 34% / 0% / 0% | 53% / 0% / 0% |
+
+  - Ở step 10, model đã bỏ tọa độ nhưng chưa biết đóng `box_end`, nên phần lớn field bị cắt cụt. Từ step 20 thì đóng đúng.
+  - Chưa cần dùng phương án dự phòng `im_end`.
+- **`infer` với adapter smoke** trên `examples/request.json` (CCCD, form không có trong 8 form smoke; CPU FP32, 1 MP, 68 s):
+  - 12/12 `ok`, không còn tọa độ, đúng 5/12 field.
+  - Lỗi còn lại là chép chưa chuẩn: chữ hoa thành chữ thường (`BÙI MỸ QUYÊN` → `Bùi Mỹ Quyên`), mất dấu (`Việt Nam` → `Viet Nam`), `Nữ` → `N`, và bỏ trống 3 dòng MRZ.
+  - Mức này hợp lý sau 30 step. Run thật mới là căn cứ đánh giá.
 
 **Bạn kiểm tra**
 ```bash
-uv run l2r4kie train --config configs/extractor/kev_smoke.yaml
-tail -3 artifacts/kev-smoke/train.jsonl
-# loss giảm rõ; log callback: coordinate_rate giảm từ ~1.0 về gần 0 trên các tài liệu đã thấy
-uv run l2r4kie infer --model Qwen/Qwen2-VL-2B-Instruct --adapter artifacts/kev-smoke --request examples/request.json --output /tmp/resp.json
+uv run pytest tests/test_training.py -q
+HF_HUB_OFFLINE=1 uv run l2r4kie train --config configs/extractor/kev_smoke.yaml --set device=cuda:0
+tail -3 artifacts/kev-smoke/train.jsonl     # loss giảm, token_accuracy/close_accuracy tăng
+cat artifacts/kev-smoke/monitor.jsonl       # coordinate_rate: 1.0 ở step 0 -> gần 0 trên split train
+HF_HUB_OFFLINE=1 uv run l2r4kie infer --adapter artifacts/kev-smoke --request examples/request.json --output /tmp/resp.json
 # value giờ là text, không còn tọa độ
 ```
 
@@ -364,7 +406,7 @@ uv run l2r4kie audit --config configs/confidence/kev.yaml
 - [x] 1 Dữ liệu
 - [x] 2 Tiền xử lý (KevFormat)
 - [x] 3 Infer
-- [ ] 4 Train (smoke → chạy thật)
+- [x] 4 Train: code và smoke xong; chạy thật `kev_r4` chờ bạn duyệt và chờ GPU trống
 - [ ] 5 Eval (cổng G1–G3)
 - [ ] 6 Confidence (cổng G4)
 - [ ] 7 CLI, tài liệu, dọn dẹp
