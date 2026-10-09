@@ -70,35 +70,40 @@ uv run l2r4kie fingerprint /home/jovyan/bachdx2/l2r4kie/artifacts/training-optim
 
 ---
 
-## Step 1: Dữ liệu (đọc dataset gốc → các split)
+## Step 1: Dữ liệu (đọc dataset gốc → các split) ✅
 
 **Chuyển và sửa**
 
 | Từ (cũ) | Sang (mới) | Sửa gì |
 |---|---|---|
-| `domain.escape`, `domain.branches` | `data/schema.py` | Đổi tên `escape_pointer`, `iter_branches`; trả `FieldSpec` thay vì dict |
-| (dict tự do) | `data/types.py` | `Document`, `FieldSpec`, `FieldRequest` (inference), `Claim` (train). Bỏ kiểu hack `Claim(id, desc, None, 0)` |
-| `data.prepare` (một hàm dài) | `data/prepare.py` | Tách thành `hash_pages`, `group_duplicates` (union-find), `assign_split`, `load_fields`, `prepare`. Định dạng output không đổi |
-| `application.select_documents` | `data/selection.py` | Tham số tường minh (`seed`, `forms`, `holdout_percent`, `balanced_forms`, `limit`) thay vì cả dict config |
-| `scripts/cache_token_review.py::plan_cohorts` | `data/cohorts.py` | **Sửa lỗi leakage:** danh sách loại trừ truyền tường minh, thiếu file thì báo lỗi, bỏ đường dẫn hardcode theo thư mục chạy |
+| `domain.escape`, `domain.branches` | `data/schema.py` | Đổi tên thành `escape_pointer`, `iter_branches`; trả `FieldSpec` thay vì dict |
+| (dict tự do) | `data/types.py` | `Document`, `FieldSpec` có `to_json`/`from_json`, giữ đúng thứ tự khóa của file cũ. `FieldRequest` (infer) và `Claim` (train) để sang step 3 và 4, khi có code dùng tới |
+| `data.prepare` (một hàm dài) | `data/prepare.py` | Tách thành `hash_pages` (hash ảnh song song), `group_duplicates` (union-find), `assign_split`, `load_fields`, `prepare`. Mọi file ghi atomic sau khi xử lý xong. Output không đổi |
+| `application.select_documents` | `data/selection.py` | `Selection(prepared, seed, holdout_percent, forms, balanced_forms).documents(split, limit)`; `Selection.from_config` chỉ đọc các khóa của nó |
+| `scripts/cache_token_review.py::plan_cohorts` | `data/cohorts.py` | **Sửa lỗi leakage:** danh sách file loại trừ ghi tường minh trong config (`.jsonl`, `.pt`, hoặc một `cohort_plan.json` cũ), thiếu file thì báo lỗi; form loại trừ là tham số (trước hardcode CCCD). `plan_cohorts` trả `CohortPlan` (lưu/đọc được cả plan cũ, `resolve` ra tài liệu). CLI không bao giờ ghi đè plan đã có |
+| (mới) | `data/stats.py` | Thống kê kiểu value và đặc điểm string mà KevFormat phải xử lý |
 
 **Kết quả**
-- CLI: `l2r4kie prepare --data <gốc> --output <dir>`, `l2r4kie data-stats --prepared <dir>`, `l2r4kie plan-cohorts --config <yaml>`.
-- Test: `tests/test_data.py`, `tests/test_cohorts.py`.
+- CLI: `l2r4kie prepare`, `l2r4kie data-stats`, `l2r4kie plan-cohorts --config <yaml> --output <plan.json>`.
+- Config: `configs/cohorts/r4_winner.yaml` (tái tạo plan cohort của lượt r4).
+- Test: `tests/test_data.py`, `tests/test_cohorts.py` (có test so byte với split cũ và so với plan r4; tự bỏ qua nếu không có repo cũ).
 
 **Bạn kiểm tra**
 ```bash
-uv run l2r4kie prepare --data /home/jovyan/bachdx2/data/kie-all-v1 --output artifacts/data
-diff <(sort artifacts/data/test.jsonl) <(sort /home/jovyan/bachdx2/l2r4kie/artifacts/data/test.jsonl) && echo "test split giống hệt"
-# làm tương tự cho train/dev/calibration và report.json (trừ trường đường dẫn source)
+uv run l2r4kie prepare --data /home/jovyan/bachdx2/data/kie-all-v1 --output artifacts/data     # ~15 giây
+for f in train.jsonl dev.jsonl calibration.jsonl test.jsonl report.json; do
+  cmp artifacts/data/$f /home/jovyan/bachdx2/l2r4kie/artifacts/data/$f && echo "$f giống hệt"; done
 uv run l2r4kie data-stats --prepared artifacts/data
-# in: số tài liệu mỗi split (9.535 / 870 / 860 / 728), 58 loại, số field theo kiểu value
+# 9.535 / 870 / 860 / 728 tài liệu; 321.931 field; 58 form
+uv run l2r4kie plan-cohorts --config configs/cohorts/r4_winner.yaml --output artifacts/cohorts/r4_winner.json
+# train 874, dev 247, calibration 158, risk_validation 254, audit 202; 1.997 tài liệu loại trừ
+uv run pytest -q
 ```
 
-**Xong khi**
-- 4 split và `report.json` giống hệt bản cũ.
-- `plan-cohorts` với cấu hình của lượt v1 tái tạo đúng cohort trong `token-review-winner/cache/cohort_plan.json`.
-- Test "thiếu file loại trừ thì báo lỗi" xanh.
+**Kết quả đã đạt**
+- 4 split và `report.json` giống hệt bản cũ từng byte.
+- `plan-cohorts` tái tạo đúng `cohorts`, `excluded_documents`, `forms`, `source_fingerprint` của `token-review-winner/cache/cohort_plan.json`.
+- Plan v2 (`token-review-v2/cache/cohort_plan.json`, audit 347 tài liệu) load và resolve được, dùng lại ở step 6.
 
 ---
 
@@ -305,7 +310,7 @@ uv run l2r4kie audit --config configs/confidence/kev.yaml
 ## Theo dõi
 
 - [x] 0 Nền móng
-- [ ] 1 Dữ liệu
+- [x] 1 Dữ liệu
 - [ ] 2 Tiền xử lý (KevFormat)
 - [ ] 3 Infer
 - [ ] 4 Train (smoke → chạy thật)

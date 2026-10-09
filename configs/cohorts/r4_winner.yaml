@@ -1,0 +1,45 @@
+# Cohorts of the r4 confidence run (old repo: artifacts/token-review-winner/cache/cohort_plan.json).
+# Reproduces that plan exactly; also the reference for planning cohorts of a new extractor.
+# Paths point at the old repository (decision D2: artifacts are not copied).
+selection:
+  prepared: /home/jovyan/bachdx2/l2r4kie/artifacts/data
+  seed: 42
+  holdout_percent: 15
+  balanced_forms: true
+cohorts:
+  seed: 107
+  train_split: train_reserve   # head-train from the reserve: never in extractor gradients
+  train_per_type: 25
+  per_type: 6                  # dev and audit
+  calibration_per_type: 3
+  risk_split: calibration      # risk_validation = calibration documents after the calibration cohort
+  risk_per_type: 10
+  exclude_forms: [lift-can-cuoc-2024]   # CCCD: no genuinely unseen documents left
+# Every document used by earlier runs (caches, predictions, training logs, evaluation sets).
+exclusions:
+  - /home/jovyan/bachdx2/l2r4kie/artifacts/review/pilot/train.pt
+  - /home/jovyan/bachdx2/l2r4kie/artifacts/review/pilot/dev.pt
+  - /home/jovyan/bachdx2/l2r4kie/artifacts/review/pilot/calibration.pt
+  - /home/jovyan/bachdx2/l2r4kie/artifacts/review/pilot/test.pt
+  - /home/jovyan/bachdx2/l2r4kie/artifacts/review/mixed/train.pt
+  - /home/jovyan/bachdx2/l2r4kie/artifacts/review/mixed/dev.pt
+  - /home/jovyan/bachdx2/l2r4kie/artifacts/review/mixed/calibration.pt
+  - /home/jovyan/bachdx2/l2r4kie/artifacts/review/mixed/test.pt
+  - /home/jovyan/bachdx2/l2r4kie/artifacts/review/pilot-independent/risk_validation.pt
+  - /home/jovyan/bachdx2/l2r4kie/artifacts/review/pilot-independent/audit.pt
+  - /home/jovyan/bachdx2/l2r4kie/artifacts/review/mixed-independent/risk_validation.pt
+  - /home/jovyan/bachdx2/l2r4kie/artifacts/review/mixed-independent/audit.pt
+  - /home/jovyan/bachdx2/l2r4kie/artifacts/token-review/mixed-cache/train.pt
+  - /home/jovyan/bachdx2/l2r4kie/artifacts/token-review/mixed-cache/dev.pt
+  - /home/jovyan/bachdx2/l2r4kie/artifacts/token-review/mixed-cache/calibration.pt
+  - /home/jovyan/bachdx2/l2r4kie/artifacts/token-review/mixed-cache/risk_validation.pt
+  - /home/jovyan/bachdx2/l2r4kie/artifacts/token-review/mixed-cache/audit.pt
+  - /home/jovyan/bachdx2/l2r4kie/artifacts/refined/test_predictions.jsonl
+  - /home/jovyan/bachdx2/l2r4kie/artifacts/refined/calibration_predictions.jsonl
+  - /home/jovyan/bachdx2/l2r4kie/artifacts/mixed-smoke/dev_predictions.jsonl
+  - /home/jovyan/bachdx2/l2r4kie/artifacts/refined/train.jsonl
+  - /home/jovyan/bachdx2/l2r4kie/artifacts/pilot/train.jsonl
+  - /home/jovyan/bachdx2/l2r4kie/artifacts/mixed-smoke/train.jsonl
+  - /home/jovyan/bachdx2/l2r4kie/artifacts/training-optimization/evaluation-data/dev.jsonl
+  - /home/jovyan/bachdx2/l2r4kie/artifacts/token-review-winner/sweep_test_documents.jsonl
+checkpoint: /home/jovyan/bachdx2/l2r4kie/artifacts/training-optimization/r4_2m_12f
