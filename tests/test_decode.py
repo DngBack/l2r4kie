@@ -40,8 +40,8 @@ def requests() -> list[FieldRequest]:
 
 
 def teacher_forced(extractor: Extractor, prefix: dict[str, torch.Tensor],
-                   results: list[DecodeResult]) -> tuple[torch.Tensor, Packed]:
-    """Pack the decoded values as targets and return the packed hidden states."""
+                   results: list[DecodeResult], layer: int | None = None) -> tuple[torch.Tensor, Packed]:
+    """Pack the decoded values as targets and return the packed hidden states (last layer or ``layer``)."""
     fmt = extractor.format
     branches = []
     for r, result in zip(requests(), results, strict=True):
@@ -49,7 +49,8 @@ def teacher_forced(extractor: Extractor, prefix: dict[str, torch.Tensor],
         branches.append(EncodedBranch(r.id, fmt.request(r.id, r.description).prompt, tokens))
     packed = pack(prefix, prefix_positions(extractor.core, prefix), branches, max_value_tokens=10_000)
     with torch.no_grad():
-        return extractor.core(**packed.inputs).last_hidden_state[0], packed
+        output = extractor.core(**packed.inputs, output_hidden_states=layer is not None)
+    return (output.last_hidden_state if layer is None else output.hidden_states[layer])[0], packed
 
 
 # ------------------------------------------------------------------ mechanics
@@ -65,6 +66,7 @@ def test_never_generates_banned_tokens_even_when_they_dominate(processor) -> Non
     generated = {t for r in results for t in r.trace.tokens}
     assert generated and not generated & set(banned)
     assert all(r.status == 'truncated' and r.signals.value is None and len(r.trace.tokens) == 12 for r in results)
+    assert all(r.signals.layers is None for r in results)
     assert all(r.trace.stats.shape == (12, len(TOKEN_STATS)) and torch.isfinite(r.trace.stats).all()
                for r in results)
 
@@ -82,6 +84,18 @@ def test_stops_at_close_marker(processor) -> None:  # noqa: ANN001
     results = decode_prefix(extractor, text_prefix(extractor), requests(), max_value_tokens=12, trace=True)
     assert [(r.status, r.text, r.value, r.trace.tokens) for r in results] == [('ok', '', '', (close,))] * 3
     assert all(r.signals.value is not None for r in results)
+    # the close row: chosen id is the close marker, so both log-probabilities agree
+    assert all(r.trace.stats[-1, 0] == r.trace.stats[-1, TOKEN_STATS.index('close_log_probability')]
+               for r in results)
+
+
+def test_layers_are_validated_and_nan_until_closed(processor) -> None:  # noqa: ANN001
+    extractor = make_extractor(processor)
+    with pytest.raises(ValueError, match='layers'):
+        decode_prefix(extractor, text_prefix(extractor), requests(), layers=(3,))
+    results = decode_prefix(extractor, text_prefix(extractor), requests(), max_value_tokens=2, layers=(0,))
+    assert all(r.status == 'truncated' and r.signals.layers.shape == (3, 1, HIDDEN) for r in results)
+    assert all(r.signals.layers[2].isnan().all() and not r.signals.layers[:2].isnan().any() for r in results)
 
 
 def test_duplicate_ids_are_rejected(processor) -> None:  # noqa: ANN001
@@ -113,11 +127,18 @@ def test_decode_matches_teacher_forced_packing(processor) -> None:  # noqa: ANN0
     prefix = text_prefix(extractor)
     values = {'/ho_ten': 'Nguyễn Văn A', '/ngay_sinh': '01/02/1990', '/dia_chi': 'Hà Nội'}
     overfit(extractor, prefix, values)
-    results = decode_prefix(extractor, prefix, requests(), max_value_tokens=32, trace=True)
+    results = decode_prefix(extractor, prefix, requests(), max_value_tokens=32, trace=True, layers=(1, 2))
     assert {r.field_id: (r.status, r.value) for r in results} == {k: ('ok', v) for k, v in values.items()}
 
     hidden, packed = teacher_forced(extractor, prefix, results)
+    middle = teacher_forced(extractor, prefix, results, layer=1)[0]
     for i, result in enumerate(results):
+        # intermediate layer 1, and layer 2 (the last) equal to the main signals
+        positions = (packed.key_positions[i], packed.decide_positions[i], packed.value_positions[i])
+        torch.testing.assert_close(result.signals.layers[:, 0], middle[torch.stack(positions)], atol=1e-5, rtol=0)
+        torch.testing.assert_close(result.signals.layers[:, 1],
+                                   torch.stack((result.signals.key, result.signals.decide, result.signals.value)),
+                                   atol=1e-5, rtol=0)
         torch.testing.assert_close(result.signals.key, hidden[packed.key_positions[i]], atol=1e-5, rtol=0)
         torch.testing.assert_close(result.signals.decide, hidden[packed.decide_positions[i]], atol=1e-5, rtol=0)
         torch.testing.assert_close(result.signals.value, hidden[packed.value_positions[i]], atol=1e-5, rtol=0)

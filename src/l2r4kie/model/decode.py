@@ -18,7 +18,9 @@ exactly what training saw:
 Signals are the hidden states of the last layer (``h_key`` at ``key_close``,
 ``h_decide`` at ``value_open``, ``h_value`` after feeding the close marker);
 they equal the teacher-forced states of :func:`~l2r4kie.model.packing.pack`
-on the same tokens (exactly in FP32, see ``tests/test_decode.py``).
+on the same tokens (exactly in FP32, see ``tests/test_decode.py``). The same
+three states can also be read at intermediate layers (``layers=``), which
+costs one extra output per step and no extra forward.
 """
 
 from __future__ import annotations
@@ -37,7 +39,8 @@ from .extractor import Extractor
 from .packing import prefix_positions
 
 #: Names of the per-token statistics in :attr:`Trace.stats`, in column order.
-TOKEN_STATS: tuple[str, ...] = ('log_probability', 'normalized_entropy', 'probability_margin', 'logit_margin')
+TOKEN_STATS: tuple[str, ...] = ('log_probability', 'normalized_entropy', 'probability_margin', 'logit_margin',
+                                'close_log_probability')
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,11 +52,17 @@ class Signals:
         decide: ``h_decide`` at ``value_open``: about to write the value.
         value: ``h_value`` after feeding the close marker: the complete value
             has been read. ``None`` when decoding was truncated.
+        layers: ``(3, len(layers), hidden)``: the key, decide and value
+            states at the intermediate layers requested from :func:`extract`
+            (index into the model's ``hidden_states``: 0 is the embedding
+            output, the last one equals the signals above). The value row is
+            NaN when decoding was truncated. ``None`` when no layer was requested.
     """
 
     key: torch.Tensor
     decide: torch.Tensor
     value: torch.Tensor | None
+    layers: torch.Tensor | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,9 +75,10 @@ class Trace:
     Attributes:
         tokens: Generated ids, close marker included if generated.
         hidden: ``(n, hidden)`` last-layer state after feeding each token.
-        stats: ``(n, 4)`` statistics of the distribution the token was
+        stats: ``(n, 5)`` statistics of the distribution the token was
             chosen from, computed *before* feeding it (see :data:`TOKEN_STATS`
-            and :func:`token_stats`).
+            and :func:`token_stats`). For the close marker's row they describe
+            the decision to stop.
     """
 
     tokens: tuple[int, ...]
@@ -100,7 +110,7 @@ class DecodeResult:
     trace: Trace | None = None
 
 
-def token_stats(logits: torch.Tensor, chosen: torch.Tensor, allowed: int) -> torch.Tensor:
+def token_stats(logits: torch.Tensor, chosen: torch.Tensor, allowed: int, close: int) -> torch.Tensor:
     """Statistics of the decoding distribution at the moment a token is chosen.
 
     Computed in FP32 on the masked logits (the distribution actually decoded
@@ -111,10 +121,13 @@ def token_stats(logits: torch.Tensor, chosen: torch.Tensor, allowed: int) -> tor
         logits: ``(batch, vocab)`` masked logits.
         chosen: ``(batch,)`` chosen ids.
         allowed: Number of ids that are not banned (entropy normalisation).
+        close: Id of the close marker.
 
     Returns:
-        ``(batch, 4)``: log-probability of the chosen id, entropy divided by
-        ``log(allowed)``, top-1 minus top-2 probability, top-1 minus top-2 logit.
+        ``(batch, 5)``: log-probability of the chosen id, entropy divided by
+        ``log(allowed)``, top-1 minus top-2 probability, top-1 minus top-2
+        logit, and log-probability of the close marker (how much the model
+        wanted to stop here; on the close row it equals the first column).
     """
     logits = logits.float()
     logp = logits.log_softmax(-1)
@@ -124,12 +137,14 @@ def token_stats(logits: torch.Tensor, chosen: torch.Tensor, allowed: int) -> tor
     return torch.stack((logp.gather(-1, chosen[:, None]).squeeze(-1),
                         -(prob * logp).sum(-1) / math.log(allowed),
                         top_prob[:, 0] - top_prob[:, 1],
-                        top_logits[:, 0] - top_logits[:, 1]), -1)
+                        top_logits[:, 0] - top_logits[:, 1],
+                        logp[:, close]), -1)
 
 
 @torch.inference_mode()
 def extract(extractor: Extractor, pages: Sequence[str | Path], requests: Sequence[FieldRequest], *,
-            max_value_tokens: int | None = None, trace: bool = False) -> list[DecodeResult]:
+            max_value_tokens: int | None = None, trace: bool = False,
+            layers: Sequence[int] = ()) -> list[DecodeResult]:
     """Extract fields from the page images of one document.
 
     Args:
@@ -139,6 +154,8 @@ def extract(extractor: Extractor, pages: Sequence[str | Path], requests: Sequenc
         max_value_tokens: Decode budget per field, close marker included;
             defaults to ``extractor.config.max_value_tokens``.
         trace: Also return the per-token :class:`Trace` of every field.
+        layers: Also return the marker states at these ``hidden_states``
+            indices (:attr:`Signals.layers`).
 
     Returns:
         One result per request, in request order.
@@ -146,12 +163,13 @@ def extract(extractor: Extractor, pages: Sequence[str | Path], requests: Sequenc
     if not requests:
         return []
     return decode_prefix(extractor, extractor.encode_prefix(pages), requests,
-                         max_value_tokens=max_value_tokens, trace=trace)
+                         max_value_tokens=max_value_tokens, trace=trace, layers=layers)
 
 
 @torch.inference_mode()
 def decode_prefix(extractor: Extractor, prefix: Mapping[str, torch.Tensor], requests: Sequence[FieldRequest], *,
-                  max_value_tokens: int | None = None, trace: bool = False) -> list[DecodeResult]:
+                  max_value_tokens: int | None = None, trace: bool = False,
+                  layers: Sequence[int] = ()) -> list[DecodeResult]:
     """Decode fields over an already encoded prefix (see :func:`extract`).
 
     Args:
@@ -162,9 +180,11 @@ def decode_prefix(extractor: Extractor, prefix: Mapping[str, torch.Tensor], requ
         requests: Fields to extract; ids must be unique.
         max_value_tokens: Decode budget per field (see :func:`extract`).
         trace: Also return per-token traces.
+        layers: Intermediate layers of the marker states (see :func:`extract`).
 
     Raises:
-        ValueError: On duplicate field ids or a non-positive budget.
+        ValueError: On duplicate field ids, a non-positive budget or a layer
+            index outside ``[0, num_hidden_layers]``.
     """
     ids = [r.id for r in requests]
     if len(set(ids)) != len(ids):
@@ -172,6 +192,9 @@ def decode_prefix(extractor: Extractor, prefix: Mapping[str, torch.Tensor], requ
     limit = extractor.config.max_value_tokens if max_value_tokens is None else max_value_tokens
     if limit < 1:
         raise ValueError(f'max_value_tokens must be positive, got {limit}')
+    depth = extractor.core.config.text_config.num_hidden_layers
+    if any(not 0 <= layer <= depth for layer in layers):
+        raise ValueError(f'layers must lie in [0, {depth}], got {list(layers)}')
     if not requests:
         return []
     extractor.model.eval()
@@ -185,12 +208,12 @@ def decode_prefix(extractor: Extractor, prefix: Mapping[str, torch.Tensor], requ
         last = start + chunk >= len(requests)
         cache = prefill.past_key_values if last else copy.deepcopy(prefill.past_key_values)
         results.extend(_decode_chunk(extractor, cache, base, prefix['input_ids'].shape[1],
-                                     requests[start:start + chunk], limit, trace))
+                                     requests[start:start + chunk], limit, trace, tuple(layers)))
     return results
 
 
 def _decode_chunk(extractor: Extractor, cache: Any, base: int, shared: int, requests: Sequence[FieldRequest],
-                  limit: int, trace: bool) -> list[DecodeResult]:
+                  limit: int, trace: bool, layers: tuple[int, ...] = ()) -> list[DecodeResult]:
     """Decode up to ``max_branches`` fields in one batch over a prefix cache.
 
     Args:
@@ -201,6 +224,7 @@ def _decode_chunk(extractor: Extractor, cache: Any, base: int, shared: int, requ
         requests: Fields of this chunk.
         limit: Decode budget per field, close marker included.
         trace: Record per-token traces.
+        layers: ``hidden_states`` indices of the extra marker states.
     """
     fmt, core, lm_head, device = extractor.format, extractor.core, extractor.lm_head, extractor.device
     n = len(requests)
@@ -220,11 +244,19 @@ def _decode_chunk(extractor: Extractor, cache: Any, base: int, shared: int, requ
         mask[i, longest - len(prompt):] = 1
     positions = base + (mask.cumsum(-1) - 1).clamp_min(0)
     attention = torch.cat([torch.ones((n, shared), dtype=torch.long, device=device), mask], -1)
+    deep = bool(layers)  # ask for every layer's output only when some are kept
     output = core(input_ids=ids, attention_mask=attention, position_ids=positions[None].expand(3, -1, -1),
-                  past_key_values=cache, use_cache=True)
+                  past_key_values=cache, use_cache=True, output_hidden_states=deep)
     hidden = output.last_hidden_state
     # Prompts end with key_close, value_open; left padding puts them last in every row.
     h_key, h_decide = hidden[:, -2].float().cpu(), hidden[:, -1].float().cpu()
+    # (n, 3, len(layers), hidden): key, decide, value (NaN until the value closes).
+    by_layer = None
+    if deep:
+        by_layer = torch.full((n, 3, len(layers), hidden.shape[-1]), torch.nan)
+        for j, layer in enumerate(layers):
+            by_layer[:, 0, j] = output.hidden_states[layer][:, -2].float().cpu()
+            by_layer[:, 1, j] = output.hidden_states[layer][:, -1].float().cpu()
     hidden = hidden[:, -1]
 
     lengths = torch.tensor([len(p) for p in prompts], device=device)
@@ -240,11 +272,11 @@ def _decode_chunk(extractor: Extractor, cache: Any, base: int, shared: int, requ
         logits = lm_head(hidden)
         logits[:, banned] = torch.finfo(logits.dtype).min
         chosen = logits.argmax(-1).masked_fill(finished, pad)
-        stats = token_stats(logits, chosen, allowed) if trace else None
+        stats = token_stats(logits, chosen, allowed, close) if trace else None
         attention = torch.cat([attention, torch.ones((n, 1), dtype=torch.long, device=device)], -1)
         step_positions = (base + lengths + step)[None, :, None].expand(3, -1, -1)
         output = core(input_ids=chosen[:, None], attention_mask=attention, position_ids=step_positions,
-                      past_key_values=cache, use_cache=True)
+                      past_key_values=cache, use_cache=True, output_hidden_states=deep)
         hidden = output.last_hidden_state[:, 0]
         for i, token in enumerate(chosen.tolist()):
             if done[i]:
@@ -255,6 +287,9 @@ def _decode_chunk(extractor: Extractor, cache: Any, base: int, shared: int, requ
                 token_stat[i].append(stats[i].cpu())
             if token == close:
                 h_value[i] = hidden[i].float().cpu()
+                if by_layer is not None:
+                    for j, layer in enumerate(layers):
+                        by_layer[i, 2, j] = output.hidden_states[layer][i, 0].float().cpu()
                 done[i] = True
         if all(done):
             break
@@ -271,5 +306,6 @@ def _decode_chunk(extractor: Extractor, cache: Any, base: int, shared: int, requ
                            torch.stack(token_hidden[i]) if token_hidden[i] else torch.empty((0, size)),
                            torch.stack(token_stat[i]) if token_stat[i] else torch.empty((0, len(TOKEN_STATS))))
         results.append(DecodeResult(request.id, parsed.value, parsed.text, parsed.status,
-                                    Signals(h_key[i], h_decide[i], h_value[i]), record))
+                                    Signals(h_key[i], h_decide[i], h_value[i],
+                                            None if by_layer is None else by_layer[i]), record))
     return results

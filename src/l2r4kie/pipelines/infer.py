@@ -12,12 +12,18 @@ paths are resolved against the request file's directory.
 Response (JSON), the old repository's schema::
 
     {"result":     {"/ho_ten": "NGUYỄN VĂN A", ...},   # null unless status is ok
-     "confidence": {"/ho_ten": null, ...},             # filled from step 6
+     "confidence": {"/ho_ten": 0.97, ...},             # null without a bundle or unless ok
      "status":     {"/ho_ten": "ok", ...},             # ok | truncated | invalid_array
-     "calibrated": false}
+     "calibrated": true}
 
-Review fields (``review``, ``document_needs_review``) are added with the
-confidence policy in step 6.
+With a confidence bundle (``--confidence``, see
+:mod:`l2r4kie.confidence.bundle`) the response also holds the review queue
+of the frozen policy, most urgent first, and whether the document needs a
+human at all::
+
+     "review": [{"id": "/so_tien", "confidence": 0.41, "status": "ok",
+                 "reason": "low_correctness_confidence", "priority": 0.59}, ...],
+     "document_needs_review": true
 """
 
 from __future__ import annotations
@@ -26,6 +32,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from ..confidence.bundle import ConfidenceBundle
 from ..data.types import FieldRequest
 from ..model.decode import DecodeResult, extract
 from ..model.extractor import Extractor
@@ -67,22 +74,48 @@ def parse_request(record: Mapping[str, Any], root: PathLike | None = None) -> tu
     return paths, requests
 
 
-def build_response(results: Sequence[DecodeResult]) -> dict[str, Any]:
-    """Response JSON of decoded fields (confidence is ``null`` until step 6)."""
-    return {'result': {r.field_id: r.value for r in results},
-            'confidence': {r.field_id: None for r in results},
-            'status': {r.field_id: r.status for r in results},
-            'calibrated': False}
+def build_response(results: Sequence[DecodeResult], scores: Sequence[float | None] | None = None,
+                   review: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Response JSON of decoded fields.
+
+    Args:
+        results: Decode results, in request order.
+        scores: Calibrated confidence per field (``None``: no bundle, all ``null``).
+        review: Review queue of the bundle's policy (added with ``document_needs_review``).
+    """
+    response = {'result': {r.field_id: r.value for r in results},
+                'confidence': {r.field_id: (scores[i] if scores is not None else None)
+                               for i, r in enumerate(results)},
+                'status': {r.field_id: r.status for r in results},
+                'calibrated': scores is not None}
+    if review is not None:
+        response['review'] = review
+        response['document_needs_review'] = bool(review)
+    return response
 
 
-def infer(extractor: Extractor, request: Mapping[str, Any], root: PathLike | None = None) -> dict[str, Any]:
-    """Extract the requested fields of one document and build the response."""
+def infer(extractor: Extractor, request: Mapping[str, Any], root: PathLike | None = None,
+          bundle: ConfidenceBundle | None = None) -> dict[str, Any]:
+    """Extract the requested fields of one document and build the response.
+
+    Args:
+        extractor: Loaded extractor.
+        request: Parsed request JSON.
+        root: Directory that relative page paths are resolved against.
+        bundle: Frozen confidence bundle; its extractor fingerprint must have
+            been checked by the caller (:meth:`ConfidenceBundle.check_source`).
+    """
     pages, requests = parse_request(request, root)
-    return build_response(extract(extractor, pages, requests))
+    if bundle is None:
+        return build_response(extract(extractor, pages, requests))
+    results = extract(extractor, pages, requests, trace=True, layers=bundle.layers)
+    scores = bundle.score(results, requests, extractor.format.tokenizer)
+    return build_response(results, scores, bundle.review(results, scores))
 
 
-def infer_file(extractor: Extractor, request: PathLike, output: PathLike) -> dict[str, Any]:
+def infer_file(extractor: Extractor, request: PathLike, output: PathLike,
+               bundle: ConfidenceBundle | None = None) -> dict[str, Any]:
     """Read a request file, run :func:`infer`, write the response atomically and return it."""
-    response = infer(extractor, read_json(request), Path(request).parent)
+    response = infer(extractor, read_json(request), Path(request).parent, bundle)
     write_json(output, response)
     return response

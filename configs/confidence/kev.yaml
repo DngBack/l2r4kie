@@ -1,0 +1,56 @@
+# Confidence heads for the kev_r4 extractor (step 6), on r4's v2 cohorts.
+#
+#   l2r4kie cache-traces --config configs/confidence/kev.yaml --split train dev calibration risk_validation
+#   l2r4kie select-heads --config configs/confidence/kev.yaml
+#   l2r4kie finalize     --config configs/confidence/kev.yaml
+#   l2r4kie cache-traces --config configs/confidence/kev.yaml --split audit     # only after finalize
+#   l2r4kie audit        --config configs/confidence/kev.yaml \
+#       --baseline-predictions /home/jovyan/bachdx2/l2r4kie/artifacts/token-review-v2/selected/attention/audit_predictions.jsonl
+#
+# Cohorts: r4's frozen v2 plan (train 796 / dev 247 / calibration 158 /
+# risk_validation 332 / audit 347 = fresh_audit 145 + seen_audit 202), so the
+# audit is paired with r4's on the same documents and fields (gate G4). None
+# of these documents is in kev_r4's extractor training set (cache-traces checks).
+#
+# Layers 14 and 21: on the smoke probe (docs/results/kev_confidence.md) the
+# value state at these layers separated right from wrong values better than
+# the final (normed) state.
+extractor: configs/extractor/kev_r4.yaml
+adapter: artifacts/kev-r4
+cohort_plan: /home/jovyan/bachdx2/l2r4kie/artifacts/token-review-v2/cache/cohort_plan.json
+cache: artifacts/kev-r4/confidence/cache
+output: artifacts/kev-r4/confidence/selected
+device: cuda:0
+fields_per_document: 24        # as r4
+max_value_tokens: null         # the extractor's budget (16384), as served; r4's cache used 256
+layers: [14, 21]
+max_trace_tokens: 512
+part_size: 16
+target_error_recall: 0.95
+risk_replicates: 2000
+heads:
+  seeds: [107, 108, 109]
+  steps: 300
+  eval_steps: [75, 150, 300]
+  grid:
+    # r4's v2 grid, unchanged (value = r4's end state).
+    - mode: [end, hybrid, hybrid_mlp, mean, attention]
+      signals: [[value]]
+      l2: [0.001, 0.01]
+      rank: [0.0, 0.3]
+    # r4's attention + field prior.
+    - mode: [attention]
+      signals: [[value]]
+      l2: [0.001, 0.01]
+      rank: [0.0, 0.3]
+      prior: [true]
+    # KevFormat states: field key, value decision, intermediate value states.
+    - mode: [hybrid, attention]
+      signals: [[value, key], [value, key, decide], ['value@14'], ['value@21'], ['value@14', 'value@21']]
+      l2: [0.001, 0.01]
+      rank: [0.0, 0.3]
+    # New: attention pooling queried by the field key.
+    - mode: [query]
+      signals: [[value]]
+      l2: [0.001, 0.01]
+      rank: [0.0, 0.3]

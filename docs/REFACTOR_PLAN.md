@@ -285,18 +285,49 @@ HF_HUB_OFFLINE=1 uv run l2r4kie infer --adapter artifacts/kev-smoke --request ex
 | bootstrap trong report script | `eval/compare.py` | Paired bootstrap theo tài liệu giữa hai bộ prediction |
 
 **Kết quả**
-- CLI: `l2r4kie evaluate --config <yaml> --adapter <dir> --split dev --output <dir>`; `l2r4kie compare --a <pred.jsonl> --b <pred.jsonl>`.
-- Test: `tests/test_metrics.py`, `tests/test_comparator.py`.
-- Báo cáo `docs/results/kev_extractor.md`.
+- CLI:
+  - `l2r4kie evaluate --config <yaml> --adapter <dir> --split dev [--documents-file plan.json] [--limit N] [--fields 24] --output <dir>`: ghi `provenance.json`, `predictions.jsonl` và `metrics.json`.
+    - Mỗi tài liệu được ghi vào `predictions.jsonl` bằng một lần ghi duy nhất.
+    - Khi chạy lại, các tài liệu đã xong được bỏ qua. Tài liệu ghi dở và dòng bị cắt ngang được bỏ đi rồi chạy lại.
+    - Nếu thư mục output thuộc về một run khác (provenance khác), lệnh báo lỗi trước khi load model.
+  - `l2r4kie evaluate-file --predictions <jsonl> [--comparator json]`: chấm lại một file prediction, kể cả file r4 cũ (dùng `raw` thay `text`, không có `form`/`kind`).
+  - `l2r4kie compare --a <baseline> --b <ứng viên> [--kind scalar]`: chênh lệch EM B − A, kèm khoảng tin cậy 95% bằng bootstrap theo tài liệu.
+- `eval/comparator.py`:
+  - `text` (mặc định): scalar so theo dạng text, nên `"123"` bằng `123` và `None` bằng `''`. Mảng phải là mảng và khớp từng phần tử.
+  - `json`: comparator cũ, kiểu JSON phải khớp.
+  - Cả hai đều chuẩn hóa NFC và strip, phân biệt hoa/thường. Status khác `ok` thì sai.
+- `eval/extraction.py`: `score` trả về:
+  - EM micro, EM macro theo form, tỷ lệ tài liệu đúng hết.
+  - EM scalar và EM mảng.
+  - Tỷ lệ tọa độ (G2) và tỷ lệ cắt cụt (G3).
+  - Số đếm theo status và theo loại lỗi.
+  - Metric theo dòng cho mảng: khớp độ dài, precision/recall/F1 theo dòng (multiset, bỏ qua thứ tự), tỷ lệ ô đúng theo chỉ số.
+- `eval/metrics.py`: bản numpy của `application.metrics`. Test đối chiếu với bản torch cũ, khớp đến 1e-12.
+- Tái lập r4:
+  - `evaluate-file --comparator json` cho EM dev 86,997% và test 88,977%. Cờ `correct` lưu sẵn khớp 100%.
+  - `text` cho cùng EM.
+  - Tập eval mới (`--documents-file cohort_plan.json --fields 24` cho dev, `--split test --limit 116 --fields 24` cho test) có đúng các cặp (tài liệu, field) của r4. Ở dev chỉ khác thứ tự tài liệu.
+- Chạy thử `evaluate` với adapter smoke (2 tài liệu dev, 6 field, GPU): 12/12 `ok`, EM 58%, không còn tọa độ. Chạy lại thì không decode lại tài liệu nào.
+- Test mới, 46 test:
+  - `tests/test_comparator.py`: hai comparator, `as_text`, `is_coordinates`, từng loại lỗi.
+  - `tests/test_metrics.py`: `score`, metric theo dòng cho mảng, `paired_delta`, `confidence_metrics` so với bản torch cũ.
+  - `tests/test_predict.py`: các dòng ghi ra, resume sau khi crash giữa một tài liệu, từ chối thư mục của run khác, thứ tự của `--documents-file`, CLI `evaluate-file` và `compare`.
+- Báo cáo đăng ký trước `docs/results/kev_extractor.md`:
+  - Baseline r4 theo `text`: EM scalar dev 90,334%, tọa độ 0%, cắt cụt 2,292% (cả 49 field đều là mảng, do budget 256).
+  - Ngưỡng: G1 ≥ 89,334%, G2 < 0,5%, G3 ≤ 2,292%.
+  - Kèm lệnh chạy chính xác.
 
 **Bạn kiểm tra**
 ```bash
 # 1. Metrics mới khớp số cũ: chấm lại prediction dev của r4 bằng json_correct
 uv run l2r4kie evaluate-file --predictions /home/jovyan/bachdx2/l2r4kie/artifacts/training-optimization/r4_2m_12f/dev.jsonl --comparator json
 # phải ra EM 87,00% như TRAINING_OPTIMIZATION_REPORT.md
-# 2. Kev so với r4 trên cùng 116 tài liệu dev, cùng comparator text
-uv run l2r4kie evaluate --config configs/extractor/kev_r4.yaml --adapter artifacts/kev-r4 --split dev --output artifacts/kev-r4/eval-dev
-uv run l2r4kie compare --a <r4 dev, chấm bằng text> --b artifacts/kev-r4/eval-dev/predictions.jsonl
+uv run pytest tests/test_comparator.py tests/test_metrics.py tests/test_predict.py -q
+# 2. Kev so với r4 trên cùng 116 tài liệu dev, cùng comparator text (sau khi train kev_r4; lệnh đầy đủ ở docs/results/kev_extractor.md)
+R4=/home/jovyan/bachdx2/l2r4kie/artifacts/training-optimization
+uv run l2r4kie evaluate --config configs/extractor/kev_r4.yaml --adapter artifacts/kev-r4 --split dev \
+  --documents-file $R4/cohort_plan.json --fields 24 --output artifacts/kev-r4/eval-dev
+uv run l2r4kie compare --a $R4/r4_2m_12f/dev.jsonl --b artifacts/kev-r4/eval-dev/predictions.jsonl --kind scalar
 ```
 
 **Cổng (ghi vào báo cáo trước khi chạy dev):**
@@ -333,20 +364,34 @@ uv run l2r4kie compare --a <r4 dev, chấm bằng text> --b artifacts/kev-r4/eva
 
 **Bạn kiểm tra**
 ```bash
-# 1. Phần calibration/policy chuyển đúng: chạy trên cache CŨ của r4
-uv run l2r4kie finalize --cache /home/jovyan/bachdx2/l2r4kie/artifacts/token-review-v2/cache --dry-run
+# 1. Phần calibration/policy chuyển đúng: chạy lại 5 head cũ trên cache CŨ của r4 (không ghi gì)
+R4=/home/jovyan/bachdx2/l2r4kie/artifacts/token-review-v2
+uv run l2r4kie finalize --legacy-selection $R4/selected --cache $R4/cache
 # ngưỡng của head attention phải là 0,9597 như CONFIDENCE_REPORT.md
 # 2. Pipeline trên extractor Kev
-uv run l2r4kie cache-traces --config configs/confidence/kev.yaml --split train   # rồi dev, calibration, risk_validation
+uv run l2r4kie cache-traces --config configs/confidence/kev.yaml --split train dev calibration risk_validation
 uv run l2r4kie select-heads --config configs/confidence/kev.yaml
 uv run l2r4kie finalize --config configs/confidence/kev.yaml
 uv run l2r4kie cache-traces --config configs/confidence/kev.yaml --split audit
-uv run l2r4kie audit --config configs/confidence/kev.yaml
+uv run l2r4kie audit --config configs/confidence/kev.yaml \
+  --baseline-predictions $R4/selected/attention/audit_predictions.jsonl
+# 3. Serving
+uv run l2r4kie infer --adapter artifacts/kev-r4 --request req.json --output resp.json \
+  --confidence artifacts/kev-r4/confidence/selected/heads/<family>
 ```
 
 **Cổng G4:** review ở mức bắt ≥95% lỗi ≤ 29,9% (r4 + attention). Báo kèm ablation `h_value` / `+h_key` / `+h_decide` / `query`, cận dưới bootstrap, và giới hạn review lý thuyết của từng extractor.
 
 **Trước khi chạy:** chốt cách audit, vì 13 loại hiếm đã hết tài liệu mới. Đề xuất: dùng lại 347 tài liệu audit cũ, ghi rõ là "đã xem", cộng thêm phần tài liệu còn mới.
+
+**Đã làm**
+- Code: `confidence/{features,heads,calibration,policy,cache,config,bundle}.py`, `eval/review_metrics.py`, `pipelines/{trace_cache,head_selection,finalize,audit}.py`; `infer --confidence`; `configs/confidence/kev.yaml`.
+- Decode lưu thêm: `h_key`/`h_decide`/`h_value` ở các layer chọn (`layers`), và cột thống kê thứ 5 là log-prob của close. Đã kiểm tra khớp với teacher forcing (sai lệch ≤ 1e-5).
+- Kiểm tra 1 đạt: ngưỡng attention 0,9597253951, so với 0,9597253875 của r4 (chênh 7,6e-9). Review trên risk 29,96% như cũ. Bốn head còn lại lệch ≤ 1,7e-5.
+- Test: 231 test pass trên CPU. Trong đó `test_pipelines.py` chạy chuỗi cache → select → finalize → audit, và infer trả đúng confidence cùng quyết định review như audit.
+- Probe tín hiệu (adapter smoke, sơ bộ): `h_value` một mình đạt AUROC 0,824; `value@14` 0,858; `value@14` + summary 0,892. Grid vì vậy có thêm layer 14/21, `key`, `decide` và mode `query`. Chi tiết ở `docs/results/kev_confidence.md`.
+- Cách audit: dùng lại cohort v2 của r4 (347 = 145 mới + 202 đã xem, báo cáo riêng). Không tài liệu nào thuộc tập train của `kev_r4`.
+- Chưa chạy: cần adapter `kev_r4` (step 4) trước.
 
 ---
 
@@ -407,6 +452,6 @@ uv run l2r4kie audit --config configs/confidence/kev.yaml
 - [x] 2 Tiền xử lý (KevFormat)
 - [x] 3 Infer
 - [x] 4 Train: code và smoke xong; chạy thật `kev_r4` chờ bạn duyệt và chờ GPU trống
-- [ ] 5 Eval (cổng G1–G3)
-- [ ] 6 Confidence (cổng G4)
+- [x] 5 Eval: code, test và báo cáo đăng ký trước xong; chạy eval dev (cổng G1–G3) chờ run `kev_r4`
+- [x] 6 Confidence: code, test, kiểm tra port trên cache r4 và báo cáo đăng ký trước xong; chạy thật (cổng G4) chờ run `kev_r4`
 - [ ] 7 CLI, tài liệu, dọn dẹp
