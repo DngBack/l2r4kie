@@ -27,12 +27,14 @@ from __future__ import annotations
 
 import copy
 import math
+import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import torch
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from ..data.types import FieldRequest
 from .extractor import Extractor
@@ -41,6 +43,9 @@ from .packing import prefix_positions
 #: Names of the per-token statistics in :attr:`Trace.stats`, in column order.
 TOKEN_STATS: tuple[str, ...] = ('log_probability', 'normalized_entropy', 'probability_margin', 'logit_margin',
                                 'close_log_probability')
+
+#: Attention backends used once cuDNN attention has failed in a chunk (see :func:`_forward`).
+FALLBACK_BACKENDS: tuple[SDPBackend, ...] = (SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH)
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +217,44 @@ def decode_prefix(extractor: Extractor, prefix: Mapping[str, torch.Tensor], requ
     return results
 
 
+def _forward(core: torch.nn.Module, cache: Any, state: dict[str, bool], **inputs: Any) -> Any:
+    """Run ``core`` over ``cache``; if cuDNN attention fails, redo the step without it.
+
+    cuDNN fused attention (PyTorch's default SDPA backend on Hopper) can fail
+    on long KV caches with ``mha_graph.execute(...).is_good()`` (seen on a
+    shared H200 after thousands of decode steps). The failure is raised
+    inside some layer, after the layers before it (and that layer itself)
+    have appended this step to the cache, so the cache is cropped back to its
+    length before the step and the step is redone with :data:`FALLBACK_BACKENDS`.
+    The chunk then stays on them (``state['fallback']``). Steps where cuDNN
+    works are untouched, so results only change where decoding would crash.
+
+    Args:
+        core: The Qwen2-VL core model.
+        cache: KV cache, appended to by this step.
+        state: Per-chunk flags; ``fallback`` is set after the first failure.
+        **inputs: Forward arguments other than ``past_key_values``.
+
+    Raises:
+        RuntimeError: Any other error, or a failure on the fallback backends.
+    """
+    if state.get('fallback'):
+        with sdpa_kernel(list(FALLBACK_BACKENDS)):
+            return core(past_key_values=cache, **inputs)
+    length = cache.get_seq_length()
+    try:
+        return core(past_key_values=cache, **inputs)
+    except RuntimeError as error:
+        if 'mha_graph' not in str(error):
+            raise
+        cache.crop(length)
+        state['fallback'] = True
+        warnings.warn(f'cuDNN attention failed at KV length {length}; continuing the chunk on '
+                      f'{[b.name for b in FALLBACK_BACKENDS]}', RuntimeWarning, stacklevel=2)
+        with sdpa_kernel(list(FALLBACK_BACKENDS)):
+            return core(past_key_values=cache, **inputs)
+
+
 def _decode_chunk(extractor: Extractor, cache: Any, base: int, shared: int, requests: Sequence[FieldRequest],
                   limit: int, trace: bool, layers: tuple[int, ...] = ()) -> list[DecodeResult]:
     """Decode up to ``max_branches`` fields in one batch over a prefix cache.
@@ -245,8 +288,9 @@ def _decode_chunk(extractor: Extractor, cache: Any, base: int, shared: int, requ
     positions = base + (mask.cumsum(-1) - 1).clamp_min(0)
     attention = torch.cat([torch.ones((n, shared), dtype=torch.long, device=device), mask], -1)
     deep = bool(layers)  # ask for every layer's output only when some are kept
-    output = core(input_ids=ids, attention_mask=attention, position_ids=positions[None].expand(3, -1, -1),
-                  past_key_values=cache, use_cache=True, output_hidden_states=deep)
+    state: dict[str, bool] = {}  # attention fallback flag of this chunk (see _forward)
+    output = _forward(core, cache, state, input_ids=ids, attention_mask=attention,
+                      position_ids=positions[None].expand(3, -1, -1), use_cache=True, output_hidden_states=deep)
     hidden = output.last_hidden_state
     # Prompts end with key_close, value_open; left padding puts them last in every row.
     h_key, h_decide = hidden[:, -2].float().cpu(), hidden[:, -1].float().cpu()
@@ -262,38 +306,56 @@ def _decode_chunk(extractor: Extractor, cache: Any, base: int, shared: int, requ
     lengths = torch.tensor([len(p) for p in prompts], device=device)
     tokens: list[list[int]] = [[] for _ in range(n)]
     h_value: list[torch.Tensor | None] = [None] * n
-    done = [False] * n  # host copy of ``finished``, avoids a device sync per row
-    finished = torch.zeros(n, dtype=torch.bool, device=device)
+    done = [False] * n  # per request; host copy of ``finished``, avoids a device sync per row
     token_hidden: list[list[torch.Tensor]] = [[] for _ in range(n)]
     token_stat: list[list[torch.Tensor]] = [[] for _ in range(n)]
-    # Finished rows stay in the batch, fed padding: dropping them
-    # (cache.batch_select_indices) copies the whole KV and was measured slower.
+    # Batch row -> request. Finished rows stay in the batch, fed padding, until
+    # half of the rows are finished; then the batch is compacted (one copy of
+    # the KV cache). Dropping every finished row at once copies the KV at each
+    # step and was measured slower on short values, but without compaction a
+    # single value that runs to the budget (a looping array, up to 16k tokens)
+    # drags every finished row along: each step then appends to, and attends
+    # over, the KV of all n rows. Halving bounds the copies to log2(n) per chunk.
+    active = list(range(n))
+    finished = torch.zeros(n, dtype=torch.bool, device=device)
     for step in range(limit):
         logits = lm_head(hidden)
         logits[:, banned] = torch.finfo(logits.dtype).min
         chosen = logits.argmax(-1).masked_fill(finished, pad)
         stats = token_stats(logits, chosen, allowed, close) if trace else None
-        attention = torch.cat([attention, torch.ones((n, 1), dtype=torch.long, device=device)], -1)
+        attention = torch.cat([attention, torch.ones((len(active), 1), dtype=torch.long, device=device)], -1)
         step_positions = (base + lengths + step)[None, :, None].expand(3, -1, -1)
-        output = core(input_ids=chosen[:, None], attention_mask=attention, position_ids=step_positions,
-                      past_key_values=cache, use_cache=True, output_hidden_states=deep)
+        output = _forward(core, cache, state, input_ids=chosen[:, None], attention_mask=attention,
+                          position_ids=step_positions, use_cache=True, output_hidden_states=deep)
         hidden = output.last_hidden_state[:, 0]
-        for i, token in enumerate(chosen.tolist()):
+        # One device-to-host copy per step for the whole batch, not one per row:
+        # each copy synchronises, and on a GPU time-sliced with other processes
+        # a synchronisation waits for their slices.
+        step_hidden = hidden.float().cpu() if trace else None
+        step_stats = stats.cpu() if trace else None
+        for row, token in enumerate(chosen.tolist()):
+            i = active[row]
             if done[i]:
                 continue
             tokens[i].append(token)
             if trace:
-                token_hidden[i].append(hidden[i].float().cpu())
-                token_stat[i].append(stats[i].cpu())
+                token_hidden[i].append(step_hidden[row].clone())  # clone: a view would keep the whole batch row
+                token_stat[i].append(step_stats[row].clone())
             if token == close:
-                h_value[i] = hidden[i].float().cpu()
+                h_value[i] = step_hidden[row].clone() if trace else hidden[row].float().cpu()
                 if by_layer is not None:
                     for j, layer in enumerate(layers):
-                        by_layer[i, 2, j] = output.hidden_states[layer][i, 0].float().cpu()
+                        by_layer[i, 2, j] = output.hidden_states[layer][row, 0].float().cpu()
                 done[i] = True
-        if all(done):
+        running = [row for row, i in enumerate(active) if not done[i]]
+        if not running:
             break
-        finished = torch.tensor(done, device=device)
+        if len(running) <= len(active) // 2:
+            keep = torch.tensor(running, device=device)
+            cache.batch_select_indices(keep)
+            attention, hidden, lengths = attention[keep], hidden[keep], lengths[keep]
+            active = [active[row] for row in running]
+        finished = torch.tensor([done[i] for i in active], device=device)
 
     results = []
     for i, request in enumerate(requests):

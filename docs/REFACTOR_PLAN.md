@@ -452,6 +452,6 @@ uv run l2r4kie infer --adapter artifacts/kev-r4 --request req.json --output resp
 - [x] 2 Tiền xử lý (KevFormat)
 - [x] 3 Infer
 - [x] 4 Train: code và smoke xong; chạy thật `kev_r4` chờ bạn duyệt và chờ GPU trống
-- [x] 5 Eval: code, test và báo cáo đăng ký trước xong; chạy eval dev (cổng G1–G3) chờ run `kev_r4`
-- [x] 6 Confidence: code, test, kiểm tra port trên cache r4 và báo cáo đăng ký trước xong; chạy thật (cổng G4) chờ run `kev_r4`
+- [x] 5 Eval: xong; `kev_r4` đạt G1–G3 trên dev, test đã chạy: ngang r4 (`docs/results/kev_extractor.md`)
+- [x] 6 Confidence: xong; G4 trượt sát (review 30,4% > 29,9%, bắt lỗi 96,9%), ngang r4 + attention (`docs/results/kev_confidence.md`)
 - [ ] 7 CLI, tài liệu, dọn dẹp

@@ -149,6 +149,36 @@ def test_decode_matches_teacher_forced_packing(processor) -> None:  # noqa: ANN0
                                    atol=1e-5, rtol=0)
 
 
+def test_compacting_finished_rows_keeps_every_state(processor, monkeypatch) -> None:  # noqa: ANN001
+    """One long value outlives the others: the batch is compacted and every state still matches packing."""
+    from transformers import DynamicCache
+
+    extractor = make_extractor(processor, max_branches=64)  # all three fields in one batch
+    prefix = text_prefix(extractor)
+    values = {'/ho_ten': 'A', '/ngay_sinh': 'B', '/dia_chi': 'Số 12 đường Láng, Đống Đa, Hà Nội'}
+    overfit(extractor, prefix, values, steps=200)
+    sizes = []
+    original = DynamicCache.batch_select_indices
+
+    def spy(self, indices):  # noqa: ANN001, ANN202
+        sizes.append(len(indices))
+        return original(self, indices)
+
+    monkeypatch.setattr(DynamicCache, 'batch_select_indices', spy)
+    results = decode_prefix(extractor, prefix, requests(), max_value_tokens=48, trace=True, layers=(1,))
+    assert {r.field_id: (r.status, r.value) for r in results} == {k: ('ok', v) for k, v in values.items()}
+    assert sizes == [1]  # 3 rows -> the long one alone, once the two short ones closed
+
+    hidden, packed = teacher_forced(extractor, prefix, results)
+    middle = teacher_forced(extractor, prefix, results, layer=1)[0]
+    for i, result in enumerate(results):
+        torch.testing.assert_close(result.signals.value, hidden[packed.value_positions[i]], atol=1e-5, rtol=0)
+        torch.testing.assert_close(result.signals.layers[2, 0], middle[packed.value_positions[i]], atol=1e-5, rtol=0)
+        start = int(packed.decide_positions[i]) + 1
+        torch.testing.assert_close(result.trace.hidden, hidden[start:start + len(result.trace.tokens)],
+                                   atol=1e-5, rtol=0)
+
+
 def test_chunking_does_not_change_results(processor) -> None:  # noqa: ANN001
     model = tiny_model(seed=5)
     one = make_extractor(processor, model, max_branches=64)
@@ -159,6 +189,49 @@ def test_chunking_does_not_change_results(processor) -> None:  # noqa: ANN001
     assert [(r.text, r.status) for r in a] == [(r.text, r.status) for r in b]
     for x, y in zip(a, b, strict=True):
         torch.testing.assert_close(x.signals.decide, y.signals.decide, atol=1e-5, rtol=0)
+
+
+def test_cudnn_attention_failure_mid_step_is_redone_on_fallback(processor, monkeypatch) -> None:  # noqa: ANN001
+    """A failure inside a later layer leaves earlier layers' cache appended: it must be cropped, not doubled."""
+    import warnings
+
+    import torch.nn.functional as F
+
+    model = tiny_model(seed=7)
+    extractor = make_extractor(processor, model)
+    prefix = text_prefix(extractor)
+    expected = decode_prefix(extractor, prefix, requests(), max_value_tokens=8, trace=True)
+    layers = model.config.text_config.num_hidden_layers
+    original, calls = F.scaled_dot_product_attention, []
+
+    def flaky(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        calls.append(1)
+        if len(calls) == 3 * layers + 1:  # second layer of the third decode forward
+            raise RuntimeError('Expected mha_graph.execute(handle, variant_pack, workspace_ptr.get()).is_good()')
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(F, 'scaled_dot_product_attention', flaky)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        got = decode_prefix(extractor, prefix, requests(), max_value_tokens=8, trace=True)
+    assert any('cuDNN attention failed' in str(w.message) for w in caught)
+    assert [(r.text, r.status, r.trace.tokens) for r in got] == [(r.text, r.status, r.trace.tokens) for r in expected]
+    for x, y in zip(got, expected, strict=True):
+        torch.testing.assert_close(x.trace.hidden, y.trace.hidden, atol=1e-5, rtol=0)
+
+
+def test_other_attention_errors_are_not_swallowed(processor, monkeypatch) -> None:  # noqa: ANN001
+    import torch.nn.functional as F
+
+    extractor = make_extractor(processor)
+
+    def broken(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise RuntimeError('CUDA error: an illegal memory access was encountered')
+
+    prefix = text_prefix(extractor)
+    monkeypatch.setattr(F, 'scaled_dot_product_attention', broken)
+    with pytest.raises(RuntimeError, match='illegal memory access'):
+        decode_prefix(extractor, prefix, requests(), max_value_tokens=4)
 
 
 # ------------------------------------------------------------ images, end to end
