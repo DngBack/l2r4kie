@@ -14,14 +14,24 @@ Fixes over the old ``scripts/cache_token_review.py``:
 * the three marker states, intermediate layers and the close decision are
   kept, not only the end state;
 * long values are kept whole for the summary, with at most
-  ``max_trace_tokens`` token states stored.
+  ``max_trace_tokens`` token states stored;
+* within a part, each decoded document is checkpointed
+  (``<split>.partNNNN.docs/``), so a worker killed mid-part (out of memory
+  on a shared GPU) loses at most the document it was decoding;
+* several workers (processes, GPUs) can fill the same cache: each part is
+  claimed with a lock file, and the worker that writes the last part merges.
+  Decoding is bound by Python and kernel launches, not by the GPU, so a few
+  workers per GPU scale almost linearly.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import socket
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -103,10 +113,41 @@ def document_rows(extractor: Extractor, document: Document, split: str, fields_p
     return rows, records, seconds, len(calls)
 
 
+def _claim(lock: Path) -> bool:
+    """Create ``lock`` for this process; take over a lock left by a dead process on this host.
+
+    Returns:
+        Whether this process now holds the lock.
+    """
+    owner = f'{socket.gethostname()} {os.getpid()}'
+    for _ in range(2):
+        try:
+            descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                host, pid = lock.read_text().split()
+            except (OSError, ValueError):
+                return False  # being written by its owner, or vanished: let the owner have it
+            if host != socket.gethostname():
+                return False
+            try:
+                os.kill(int(pid), 0)
+                return False  # owner alive
+            except ProcessLookupError:
+                lock.unlink(missing_ok=True)  # stale: its owner crashed
+                continue
+            except PermissionError:
+                return False
+        with os.fdopen(descriptor, 'w') as handle:
+            handle.write(owner)
+        return True
+    return False
+
+
 def cache_traces(extractor: Extractor, documents: Sequence[Document], directory: PathLike, split: str,
                  fields_per_document: int | None = 24, max_value_tokens: int | None = None,
                  layers: Sequence[int] = (), max_trace_tokens: int = 512,
-                 provenance: Mapping[str, Any] | None = None, part_size: int = 16) -> Path:
+                 provenance: Mapping[str, Any] | None = None, part_size: int = 16) -> Path | None:
     """Decode ``documents`` and write ``<directory>/<split>.pt`` (resumable).
 
     Args:
@@ -123,7 +164,8 @@ def cache_traces(extractor: Extractor, documents: Sequence[Document], directory:
         part_size: Documents per resumable part.
 
     Returns:
-        Path of the cache.
+        Path of the cache, or ``None`` if parts are still being decoded by
+        other workers (the last of them merges).
 
     Raises:
         ValueError: If the directory holds a cache or parts of a different run.
@@ -151,25 +193,74 @@ def cache_traces(extractor: Extractor, documents: Sequence[Document], directory:
     started = time.monotonic()
     for number, part in enumerate(parts):
         part_path = directory / f'{split}.part{number:04d}.pt'
-        if part_path.exists():
+        lock = part_path.with_suffix('.lock')
+        if part_path.exists() or not _claim(lock):
             continue
-        rows, records, timings, vision = [], [], [], []
-        for document in part:
-            document_rows_, document_records, seconds, calls = document_rows(
-                extractor, document, split, fields_per_document, budget, layers, max_trace_tokens)
-            for row in document_rows_:
-                if row['trace_index'] >= 0:
-                    row['trace_index'] += len(records)
-            rows.extend(document_rows_)
-            records.extend(document_records)
-            timings.append(seconds)
-            vision.append(calls)
-        save_cache(part_path, rows, records, {'split': split, 'part': number, 'timings_seconds': timings,
-                                              'vision_calls_per_document': vision})
+        try:
+            if part_path.exists():  # finished by another worker between the check and the claim
+                continue
+            rows, records, timings, vision = [], [], [], []
+            checkpoints = part_path.with_suffix('.docs')
+            for index, document in enumerate(part):
+                document_rows_, document_records, seconds, calls = _document_checkpoint(
+                    checkpoints / f'{index:03d}.pt', document,
+                    lambda d=document: document_rows(extractor, d, split, fields_per_document, budget, layers,
+                                                     max_trace_tokens))
+                for row in document_rows_:
+                    if row['trace_index'] >= 0:
+                        row['trace_index'] += len(records)
+                rows.extend(document_rows_)
+                records.extend(document_records)
+                timings.append(seconds)
+                vision.append(calls)
+            save_cache(part_path, rows, records, {'split': split, 'part': number, 'timings_seconds': timings,
+                                                  'vision_calls_per_document': vision})
+            shutil.rmtree(checkpoints, ignore_errors=True)
+        finally:
+            lock.unlink(missing_ok=True)
         done = min(len(documents), (number + 1) * part_size)
-        print(json.dumps({'split': split, 'documents': done, 'of': len(documents), 'fields': len(rows),
-                          'valid': len(records), 'seconds': round(time.monotonic() - started, 1)}), flush=True)
-    return _merge(directory, split, len(parts), record)
+        print(json.dumps({'split': split, 'part': number, 'documents': done, 'of': len(documents),
+                          'fields': len(rows), 'valid': len(records),
+                          'seconds': round(time.monotonic() - started, 1)}), flush=True)
+    missing = [n for n in range(len(parts)) if not (directory / f'{split}.part{n:04d}.pt').exists()]
+    merge_lock = directory / f'{split}.merge.lock'
+    if missing or path.exists() or not _claim(merge_lock):
+        print(json.dumps({'split': split, 'parts_left_to_other_workers': missing}), flush=True)
+        return path if path.exists() else None
+    try:
+        return _merge(directory, split, len(parts), record)
+    finally:
+        merge_lock.unlink(missing_ok=True)
+
+
+def _document_checkpoint(path: Path, document: Document,
+                         decode: Callable[[], tuple[list[dict[str, Any]], list[dict[str, Any]], float, int]]
+                         ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], float, int]:
+    """Return a document's rows, records, seconds and vision forwards, from ``path`` or by decoding.
+
+    A part holds 16 documents, and documents with long arrays take many
+    minutes each at the serving budget; on a shared GPU a worker may die
+    (out of memory) in the middle of a part. Each decoded document is saved
+    to ``path`` (atomically), so a restarted worker resumes at the next
+    document instead of decoding the whole part again. Row ``trace_index``
+    values are stored as returned by :func:`document_rows` (from 0 within
+    the document), before the caller offsets them.
+
+    Raises:
+        ValueError: If ``path`` holds another document (the cohort changed).
+    """
+    if path.exists():
+        saved = torch.load(path, map_location='cpu', weights_only=True)
+        if saved['document_id'] != document.id:
+            raise ValueError(f'{path} holds {saved["document_id"]}, expected {document.id}')
+        return saved['rows'], saved['traces'], saved['seconds'], saved['vision_calls']
+    rows, records, seconds, calls = decode()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix('.tmp')
+    torch.save({'document_id': document.id, 'rows': [dict(r) for r in rows], 'traces': records,
+                'seconds': seconds, 'vision_calls': calls}, tmp)
+    tmp.replace(path)
+    return rows, records, seconds, calls
 
 
 def _merge(directory: Path, split: str, parts: int, record: Mapping[str, Any]) -> Path:
@@ -198,4 +289,6 @@ def _merge(directory: Path, split: str, parts: int, record: Mapping[str, Any]) -
                 'seconds': sum(timings)})
     for number in range(parts):
         (directory / f'{split}.part{number:04d}.pt').unlink()
+        # Left by a worker that died before another one redid the part from scratch.
+        shutil.rmtree(directory / f'{split}.part{number:04d}.docs', ignore_errors=True)
     return path

@@ -232,3 +232,61 @@ def test_resolve_cohorts_refuses_extractor_training_documents(tmp_path: Path) ->
         resolve_cohorts(plan, selection, ['train'])
     with pytest.raises(KeyError, match='audit'):
         resolve_cohorts(plan, selection, ['audit'])
+
+
+def test_workers_share_a_cache_through_part_locks(run: SimpleNamespace) -> None:
+    import os
+    import socket
+    import subprocess
+
+    cache = run.tmp / 'shared'
+    documents = run.documents['dev']
+    host = socket.gethostname()
+    kwargs = {'layers': (3,), 'max_trace_tokens': 4, 'provenance': {'source_fingerprint': 'fp'}, 'part_size': 7}
+    cache.mkdir()
+    # Part 1 is held by a live worker: skipped, and nobody merges yet.
+    (cache / 'dev.part0001.lock').write_text(f'{host} {os.getppid()}')
+    assert cache_traces(run.extractor, documents, cache, 'dev', **kwargs) is None
+    assert sorted(p.name for p in cache.glob('dev.part*.pt')) == ['dev.part0000.pt', 'dev.part0002.pt',
+                                                                 'dev.part0003.pt']
+    # Its worker died: the lock is stale and the part is taken over, then the cache is merged.
+    dead = subprocess.Popen(['true'])
+    dead.wait()
+    (cache / 'dev.part0001.lock').write_text(f'{host} {dead.pid}')
+    path = cache_traces(run.extractor, documents, cache, 'dev', **kwargs)
+    assert path == cache / 'dev.pt' and not list(cache.glob('dev.part*'))
+    reference = torch.load(Path(run.config.cache) / 'dev.pt', weights_only=True)
+    merged = torch.load(path, weights_only=True)
+    assert merged['rows'] == reference['rows']
+    torch.testing.assert_close(merged['traces'][5]['tokens'], reference['traces'][5]['tokens'])
+
+
+def test_a_worker_killed_mid_part_resumes_at_the_next_document(run: SimpleNamespace,
+                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    cache = run.tmp / 'resumed'
+    documents = run.documents['dev']
+    kwargs = {'layers': (3,), 'max_trace_tokens': 4, 'provenance': {'source_fingerprint': 'fp'}, 'part_size': 7}
+    real, decoded = trace_cache_module.document_rows, []
+
+    def dies_on_the_fourth(extractor, document, *args):  # noqa: ANN001, ANN002, ANN202
+        if len(decoded) == 3:
+            raise torch.OutOfMemoryError('CUDA out of memory')
+        decoded.append(document.id)
+        return real(extractor, document, *args)
+
+    monkeypatch.setattr(trace_cache_module, 'document_rows', dies_on_the_fourth)
+    with pytest.raises(torch.OutOfMemoryError):
+        cache_traces(run.extractor, documents, cache, 'dev', **kwargs)
+    assert sorted(p.name for p in (cache / 'dev.part0000.docs').glob('*.pt')) == ['000.pt', '001.pt', '002.pt']
+    assert not list(cache.glob('*.lock'))
+
+    decoded.clear()
+    monkeypatch.setattr(trace_cache_module, 'document_rows', lambda *a: (decoded.append(a[1].id), real(*a))[1])
+    path = cache_traces(run.extractor, documents, cache, 'dev', **kwargs)
+    assert decoded == [d.id for d in documents[3:]]  # nothing decoded twice
+    assert not list(cache.glob('dev.part*'))
+    reference = torch.load(Path(run.config.cache) / 'dev.pt', weights_only=True)
+    merged = torch.load(path, weights_only=True)
+    assert merged['rows'] == reference['rows']
+    for a, b in zip(merged['traces'], reference['traces'], strict=True):
+        torch.testing.assert_close(a['tokens'], b['tokens'])

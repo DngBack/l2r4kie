@@ -1,12 +1,12 @@
 # Kết quả: confidence trên extractor KevFormat so với r4
 
-Trạng thái: **đã đăng ký trước, chưa chạy trên `kev_r4`.**
+Trạng thái: **đã chạy trên `kev_r4` (2026-10-12). G4 trượt sát: review 30,4% > 29,9%; bắt lỗi 96,9% đạt. Ngang r4 trong khoảng tin cậy.**
 - Các phần "Giao thức" và "Cổng G4" được viết trước khi có trace nào của `kev_r4`. Không sửa chúng sau khi đã chạy.
 - Đã có hai thứ: kiểm tra phần port trên cache cũ của r4, và một probe tín hiệu trên adapter smoke (mục cuối, chỉ dùng để chọn tín hiệu đưa vào grid).
 
 ## Câu hỏi
 
-Với extractor KevFormat (train chỉ bằng CE, không có head BCE hay negative giả), head đọc trace của chính lượt decode có giảm được số field phải review xuống bằng hoặc thấp hơn r4 + attention không? Điều kiện là vẫn bắt ≥95% lỗi.
+Với extractor KevFormat (train chỉ bằng CE, như r4), head đọc trace của chính lượt decode có giảm được số field phải review xuống bằng hoặc thấp hơn r4 + attention không? Điều kiện là vẫn bắt ≥95% lỗi.
 
 ## Tín hiệu dùng được (tại mỗi cặp key–value)
 
@@ -84,7 +84,7 @@ Báo cáo kèm, không phải cổng:
 - Review lý thuyết (`oracle_review_rate`) của mỗi extractor.
 - Ablation theo family: `value` / `+key` / `+key+decide` / `value@L` / `query` / prior.
 
-**Rủi ro đã biết trước:** `h_end` của r4 được train cùng một head BCE và negative giả. `h_value` của Kev chỉ qua CE, nên có thể chứa ít thông tin về đúng/sai hơn. Probe dưới đây cho thấy nó vẫn tách được đúng/sai, nhưng probe chạy trên một adapter khác.
+**Rủi ro đã biết trước:** cả r4 và Kev đều chỉ train bằng CE (`confidence_weight: 0`), nên không bên nào có lợi thế ở đây. Khác biệt nằm ở vị trí state: `h_end` của r4 ở sau `<|im_end|>` của cả câu trả lời JSON, còn `h_value` của Kev ở sau `<|box_end|>` của từng value. Probe dưới đây chạy trên adapter smoke, không phải `kev_r4`.
 
 ## Đã kiểm tra
 
@@ -140,7 +140,7 @@ Cách probe:
 | **value@14 + summary** | 1.563 | **0,892** |
 
 Nhận xét (sơ bộ, adapter yếu, chỉ probe tuyến tính):
-- **`h_value` vẫn mang thông tin tổng thể dù không train cùng BCE.** Một mình nó đạt 0,824, ngang summary token. Gộp với summary thì bổ sung cho nhau (0,868).
+- **`h_value` mang thông tin tổng thể dù chỉ train bằng CE.** Một mình nó đạt 0,824, ngang summary token. Gộp với summary thì bổ sung cho nhau (0,868).
 - **State ở layer giữa tốt hơn layer cuối.** `value@14` và `value@21` đạt 0,858, so với 0,824 ở layer cuối.
   - Giả thuyết: layer cuối (đã norm) chuyên cho việc đoán token tiếp theo sau `box_end`. Layer giữa còn giữ "đã đọc được gì".
   - Vì thế config chính cache layer 14 và 21.
@@ -150,4 +150,77 @@ Nhận xét (sơ bộ, adapter yếu, chỉ probe tuyến tính):
 
 ## Kết quả trên `kev_r4`
 
-*(chưa chạy: điền sau `audit`)*
+Chạy 2026-10-12. Head đóng băng trước khi decode audit (`frozen_before_audit: true`).
+File: `artifacts/kev-r4/confidence/selected/{selection,frozen,audit_report}.json`.
+
+**Cohort đã cache** (24 field/tài liệu, budget 16.384, layer 14/21):
+
+| Cohort | Tài liệu | Field | Có trace | Đúng |
+|---|---:|---:|---:|---:|
+| train | 796 | 14.895 | 14.761 | 12.848 (86,3%) |
+| dev | 247 | 4.489 | 4.440 | 3.918 (87,3%) |
+| calibration | 158 | 2.986 | 2.965 | 2.601 (87,1%) |
+| risk_validation | 332 | 6.224 | 6.166 | 5.422 (87,1%) |
+| audit | 347 | 6.580 | 6.526 | 5.675 (86,2%) |
+
+**Head chính** (chọn trên dev theo luật đã đăng ký): `attention[value@14+value@21]`, tức attention pooling trên state value ở layer 14 và 21. Ngưỡng 0,9362 fit trên risk_validation; cả hai cận dưới 95% (Wilson 0,9500, bootstrap 0,9511) đều ≥ 95%.
+
+### Cổng G4 (347 tài liệu audit, 6.580 field, 905 lỗi)
+
+| | Kev | Ngưỡng | r4 trên cùng audit | |
+|---|---:|---:|---:|---|
+| G4a: review | **30,43%** [28,6–32,2] | ≤ 29,9% | 29,86% | **trượt** (+0,53 điểm) |
+| G4b: bắt lỗi | **96,9%** [95,8–97,9] | ≥ 95% | 96,8% | đạt |
+
+- **Không đạt G4.** Review vượt ngưỡng 0,53 điểm.
+- **So ghép cặp với r4** (bootstrap theo tài liệu, 2.000 lần): Kev − r4 = **+0,56 điểm [−0,72; +1,82]**. Khoảng chứa 0, nên Kev và r4 ngang nhau. Kev có nhiều lỗi hơn để bắt (905 so với 852), vì EM thấp hơn một chút.
+- Review lý thuyết (`oracle_review_rate`, bằng tỷ lệ lỗi): 13,1%. Head đang review gấp khoảng 2,3 lần mức tối thiểu.
+- Không tính field bắt buộc review (54 field cắt cụt hoặc invalid): review 29,85%, bắt lỗi 96,7%.
+- AUROC 0,966; ECE 0,012; AURC 0,0152; AUROC trong cùng (form, field) 0,875 (212 nhóm).
+- Theo ngân sách review: 10% bắt 63,8% lỗi; 20% bắt 89,7%; 30% bắt 96,7%; 50% bắt 99,1%.
+
+**Tách `fresh_audit` / `seen_audit`:**
+
+| | Tài liệu | Review Kev | Review r4 | Kev − r4 [KTC 95%] | Bắt lỗi Kev / r4 |
+|---|---:|---:|---:|---|---|
+| fresh_audit | 145 | 30,7% | 29,0% | +1,7 [+0,1; +3,4] | 97,6% / 98,8% |
+| seen_audit | 202 | 30,2% | 30,5% | −0,3 [−2,2; +1,5] | 96,4% / 95,5% |
+
+Trên `fresh_audit`, Kev review nhiều hơn r4, và khoảng tin cậy vừa sát trên 0.
+
+### Ablation theo family (cùng audit; ngưỡng mỗi family fit trên risk_validation)
+
+| Family | Review | Bắt lỗi | AUROC | Kev − r4 [KTC 95%] |
+|---|---:|---:|---:|---|
+| mean[value] | 29,39% | 96,1% | 0,963 | −0,47 [−1,77; +0,81] |
+| attention[value@21] | 29,51% | 97,2% | 0,969 | −0,35 [−1,67; +0,94] |
+| **attention[value@14+value@21]** (chính) | 30,43% | 96,9% | 0,966 | +0,56 [−0,72; +1,82] |
+| query[value] | 31,06% | 96,8% | 0,960 | |
+| attention[value]+prior | 31,57% | 96,4% | 0,962 | |
+| hybrid_mlp[value] | 31,60% | 97,0% | 0,961 | |
+| attention[value] (head của r4, trên state Kev) | 31,66% | 96,4% | 0,962 | +1,79 [+0,41; +3,19] |
+| attention[value+key] | 32,48% | 96,4% | 0,960 | |
+| attention[value@14] | 34,10% | 97,7% | 0,964 | |
+| attention[value+key+decide] | 36,16% | 97,4% | 0,958 | |
+| hybrid[value] | 38,48% | 95,6% | 0,940 | |
+| min log-prob (không train) | 45,24% | 96,2% | 0,923 | |
+| mean log-prob (không train) | 57,45% | 97,9% | 0,881 | |
+| end[value] | 63,12% | 96,1% | 0,879 | |
+
+Hai family có review dưới 29,9% trên audit (`mean[value]`, `attention[value@21]`). Nhưng chúng không được chọn trên dev, và đọc chúng sau khi đã thấy audit là chọn lại trên tập test. Chúng chỉ là gợi ý cho lần đăng ký sau.
+
+### Đọc kết quả
+
+- **Câu hỏi đặt ra không được trả lời "có".** Trên extractor KevFormat, head đọc trace của chính lượt decode review 30,4%, ngang r4 + attention (29,9%). Khác biệt nằm trong nhiễu.
+- **State ở layer giữa có giúp.** Cùng head attention, `value@14+value@21` review ít hơn `value` (layer cuối) 1,2 điểm. Khi đặt head của r4 lên state layer cuối của Kev, kết quả kém r4 rõ ràng: +1,8 [+0,4; +3,2].
+- **`key` và `decide` không giúp.** Thêm vào làm review tăng, khớp với probe.
+- **Thứ hạng family trên dev và audit lệch nhau khoảng ±1 điểm.** Khoảng cách giữa các head tốt nhất nhỏ hơn mức nhiễu khi chọn.
+
+### Ghi chú vận hành (không ảnh hưởng kết quả)
+
+Cache chạy trên GPU dùng chung (khoảng 20 giờ wall-clock). Trong lúc chạy đã sửa ba điểm trong decode và cache:
+1. Fallback khi cuDNN attention lỗi: crop KV rồi chạy lại bước đó.
+2. Thu gọn batch khi một nửa số nhánh đã đóng. Một value lặp tới 16.384 token từng giữ cả 24 nhánh trong batch, chậm khoảng 5 lần.
+3. Checkpoint theo từng tài liệu trong mỗi part.
+
+Cả ba đều giữ nguyên giá trị ở những bước vốn chạy được (có test). Riêng (2) đổi kích thước batch, nên có thể lệch ở mức bf16 trên các value rất dài. Các value đó phần lớn đã là sai hoặc cắt cụt.

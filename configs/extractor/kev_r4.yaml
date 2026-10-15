@@ -2,8 +2,8 @@
 # 2.1 MP pages, 12 fields per document, 1000 steps, LoRA r16/alpha32, lr 1e-4,
 # seed 42, 15% train hold-out (reserve for the confidence head), balanced forms.
 # Differences from r4, all intended: KevFormat (markers, text values), array
-# descriptions, max_value_tokens 16384 instead of 256 (no field dropped), no
-# confidence head or synthetic negatives in the loss.
+# descriptions, max_value_tokens 16384 instead of 256 (no field dropped). Loss as
+# r4: CE only (r4 had confidence_weight 0 and ranking_weight 0).
 model: Qwen/Qwen2-VL-2B-Instruct
 output: artifacts/kev-r4
 device: cuda:0
