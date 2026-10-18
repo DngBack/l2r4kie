@@ -14,6 +14,9 @@ exactly what training saw:
 4. Tokens are chosen greedily from logits where every special token except
    the close marker is masked out, so a value is plain text ended by
    the close marker or by the token budget.
+5. With ``early_stop`` (the default), a branch also ends as soon as it can no
+   longer be ``'ok'`` (see :mod:`~l2r4kie.model.early_stop`); the others are
+   untouched.
 
 Signals are the hidden states of the last layer (``h_key`` at ``key_close``,
 ``h_decide`` at ``value_open``, ``h_value`` after feeding the close marker);
@@ -37,7 +40,9 @@ import torch
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from ..data.types import FieldRequest
+from .early_stop import BranchStop, token_piece
 from .extractor import Extractor
+from .format import ParsedValue
 from .packing import prefix_positions
 
 #: Names of the per-token statistics in :attr:`Trace.stats`, in column order.
@@ -101,10 +106,14 @@ class DecodeResult:
             ``status == 'ok'``.
         text: Generated text, close marker excluded.
         status: ``'ok'``, ``'truncated'`` (no close marker within
-            ``max_value_tokens``) or ``'invalid_array'`` (an array field whose
-            text is not a JSON array).
+            ``max_value_tokens``, or stopped in a loop) or ``'invalid_array'``
+            (an array field whose text is not, or can no longer become, a
+            JSON array).
         signals: Marker hidden states.
         trace: Per-token record; only when requested.
+        stop: Why decoding ended: ``'close'`` (close marker), ``'budget'``
+            (``max_value_tokens``), ``'invalid_json'`` or ``'loop'`` (early
+            stop); ``None`` when not recorded.
     """
 
     field_id: str
@@ -113,6 +122,7 @@ class DecodeResult:
     status: str
     signals: Signals
     trace: Trace | None = None
+    stop: str | None = None
 
 
 def token_stats(logits: torch.Tensor, chosen: torch.Tensor, allowed: int, close: int) -> torch.Tensor:
@@ -149,7 +159,7 @@ def token_stats(logits: torch.Tensor, chosen: torch.Tensor, allowed: int, close:
 @torch.inference_mode()
 def extract(extractor: Extractor, pages: Sequence[str | Path], requests: Sequence[FieldRequest], *,
             max_value_tokens: int | None = None, trace: bool = False,
-            layers: Sequence[int] = ()) -> list[DecodeResult]:
+            layers: Sequence[int] = (), early_stop: bool | None = None) -> list[DecodeResult]:
     """Extract fields from the page images of one document.
 
     Args:
@@ -161,6 +171,8 @@ def extract(extractor: Extractor, pages: Sequence[str | Path], requests: Sequenc
         trace: Also return the per-token :class:`Trace` of every field.
         layers: Also return the marker states at these ``hidden_states``
             indices (:attr:`Signals.layers`).
+        early_stop: End branches that can no longer be ``'ok'``; defaults to
+            ``extractor.config.early_stop``.
 
     Returns:
         One result per request, in request order.
@@ -168,13 +180,13 @@ def extract(extractor: Extractor, pages: Sequence[str | Path], requests: Sequenc
     if not requests:
         return []
     return decode_prefix(extractor, extractor.encode_prefix(pages), requests,
-                         max_value_tokens=max_value_tokens, trace=trace, layers=layers)
+                         max_value_tokens=max_value_tokens, trace=trace, layers=layers, early_stop=early_stop)
 
 
 @torch.inference_mode()
 def decode_prefix(extractor: Extractor, prefix: Mapping[str, torch.Tensor], requests: Sequence[FieldRequest], *,
                   max_value_tokens: int | None = None, trace: bool = False,
-                  layers: Sequence[int] = ()) -> list[DecodeResult]:
+                  layers: Sequence[int] = (), early_stop: bool | None = None) -> list[DecodeResult]:
     """Decode fields over an already encoded prefix (see :func:`extract`).
 
     Args:
@@ -186,6 +198,7 @@ def decode_prefix(extractor: Extractor, prefix: Mapping[str, torch.Tensor], requ
         max_value_tokens: Decode budget per field (see :func:`extract`).
         trace: Also return per-token traces.
         layers: Intermediate layers of the marker states (see :func:`extract`).
+        early_stop: See :func:`extract`.
 
     Raises:
         ValueError: On duplicate field ids, a non-positive budget or a layer
@@ -202,6 +215,7 @@ def decode_prefix(extractor: Extractor, prefix: Mapping[str, torch.Tensor], requ
         raise ValueError(f'layers must lie in [0, {depth}], got {list(layers)}')
     if not requests:
         return []
+    stop = extractor.config.early_stop if early_stop is None else early_stop
     extractor.model.eval()
     positions = prefix_positions(extractor.core, prefix)
     base = int(positions.max()) + 1
@@ -213,7 +227,7 @@ def decode_prefix(extractor: Extractor, prefix: Mapping[str, torch.Tensor], requ
         last = start + chunk >= len(requests)
         cache = prefill.past_key_values if last else copy.deepcopy(prefill.past_key_values)
         results.extend(_decode_chunk(extractor, cache, base, prefix['input_ids'].shape[1],
-                                     requests[start:start + chunk], limit, trace, tuple(layers)))
+                                     requests[start:start + chunk], limit, trace, tuple(layers), stop))
     return results
 
 
@@ -256,7 +270,8 @@ def _forward(core: torch.nn.Module, cache: Any, state: dict[str, bool], **inputs
 
 
 def _decode_chunk(extractor: Extractor, cache: Any, base: int, shared: int, requests: Sequence[FieldRequest],
-                  limit: int, trace: bool, layers: tuple[int, ...] = ()) -> list[DecodeResult]:
+                  limit: int, trace: bool, layers: tuple[int, ...] = (),
+                  early_stop: bool = False) -> list[DecodeResult]:
     """Decode up to ``max_branches`` fields in one batch over a prefix cache.
 
     Args:
@@ -268,6 +283,7 @@ def _decode_chunk(extractor: Extractor, cache: Any, base: int, shared: int, requ
         limit: Decode budget per field, close marker included.
         trace: Record per-token traces.
         layers: ``hidden_states`` indices of the extra marker states.
+        early_stop: Stop branches that can no longer be ``'ok'``.
     """
     fmt, core, lm_head, device = extractor.format, extractor.core, extractor.lm_head, extractor.device
     n = len(requests)
@@ -307,6 +323,9 @@ def _decode_chunk(extractor: Extractor, cache: Any, base: int, shared: int, requ
     tokens: list[list[int]] = [[] for _ in range(n)]
     h_value: list[torch.Tensor | None] = [None] * n
     done = [False] * n  # per request; host copy of ``finished``, avoids a device sync per row
+    stopped: list[str | None] = [None] * n  # early-stop reason per request
+    piece = token_piece(fmt.tokenizer) if early_stop else None
+    detectors = [BranchStop(r.kind, piece) for r in requests] if early_stop else None
     token_hidden: list[list[torch.Tensor]] = [[] for _ in range(n)]
     token_stat: list[list[torch.Tensor]] = [[] for _ in range(n)]
     # Batch row -> request. Finished rows stay in the batch, fed padding, until
@@ -347,6 +366,9 @@ def _decode_chunk(extractor: Extractor, cache: Any, base: int, shared: int, requ
                     for j, layer in enumerate(layers):
                         by_layer[i, 2, j] = output.hidden_states[layer][row, 0].float().cpu()
                 done[i] = True
+            elif detectors is not None:
+                stopped[i] = detectors[i].push(token)
+                done[i] = stopped[i] is not None
         running = [row for row, i in enumerate(active) if not done[i]]
         if not running:
             break
@@ -361,6 +383,8 @@ def _decode_chunk(extractor: Extractor, cache: Any, base: int, shared: int, requ
     for i, request in enumerate(requests):
         closed = h_value[i] is not None
         parsed = fmt.parse(tokens[i][:-1] if closed else tokens[i], request.kind, closed=closed)
+        if stopped[i] == 'invalid_json':  # can never parse, closed or not
+            parsed = ParsedValue(parsed.text, None, 'invalid_array')
         record = None
         if trace:
             size = h_key.shape[-1]
@@ -369,5 +393,6 @@ def _decode_chunk(extractor: Extractor, cache: Any, base: int, shared: int, requ
                            torch.stack(token_stat[i]) if token_stat[i] else torch.empty((0, len(TOKEN_STATS))))
         results.append(DecodeResult(request.id, parsed.value, parsed.text, parsed.status,
                                     Signals(h_key[i], h_decide[i], h_value[i],
-                                            None if by_layer is None else by_layer[i]), record))
+                                            None if by_layer is None else by_layer[i]), record,
+                                    'close' if closed else stopped[i] or 'budget'))
     return results

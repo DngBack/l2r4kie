@@ -250,3 +250,37 @@ def test_extract_runs_the_vision_encoder_once(processor, tmp_path: Path) -> None
     assert len(calls) == 1
     assert [r.field_id for r in results] == [r.id for r in requests()]
     assert all(r.status == 'truncated' and r.signals.key.shape == (HIDDEN,) for r in results)
+
+
+# ------------------------------------------------------------------ early stop
+
+def constant_head(extractor: Extractor, token: int) -> None:
+    """Replace the LM head by one whose bias makes ``token`` win at every step."""
+    head = torch.nn.Linear(HIDDEN, VOCAB, bias=True)
+    torch.nn.init.zeros_(head.weight)
+    torch.nn.init.zeros_(head.bias)
+    with torch.no_grad():
+        head.bias[token] = 1
+    extractor.base.lm_head = head
+
+
+def test_early_stop_ends_invalid_arrays_and_loops(processor) -> None:  # noqa: ANN001
+    extractor = make_extractor(processor)
+    x = extractor.format.tokenizer('x', add_special_tokens=False)['input_ids'][0]
+    constant_head(extractor, x)  # every value is 'xxxx...': no JSON array, and a loop of period 1
+    fields = [FieldRequest('/table', 'Bảng', 'array'), FieldRequest('/name', 'Tên')]
+    stopped = decode_prefix(extractor, text_prefix(extractor), fields, max_value_tokens=300, trace=True)
+    assert [(r.status, r.stop, r.text) for r in stopped] == [('invalid_array', 'invalid_json', 'x'),
+                                                             ('truncated', 'loop', 'x' * 128)]
+    assert [len(r.trace.tokens) for r in stopped] == [1, 128]
+    full = decode_prefix(extractor, text_prefix(extractor), fields, max_value_tokens=300, early_stop=False)
+    assert [(r.status, r.stop, r.text) for r in full] == [('truncated', 'budget', 'x' * 300)] * 2
+
+
+def test_early_stop_leaves_valid_values_alone(processor) -> None:  # noqa: ANN001
+    extractor = make_extractor(processor)
+    prefix = text_prefix(extractor)
+    on = decode_prefix(extractor, prefix, requests(), max_value_tokens=40, trace=True)
+    off = decode_prefix(extractor, prefix, requests(), max_value_tokens=40, trace=True, early_stop=False)
+    assert [(r.text, r.status, r.trace.tokens) for r in on] == [(r.text, r.status, r.trace.tokens) for r in off]
+    assert all(torch.equal(a.trace.stats, b.trace.stats) for a, b in zip(on, off, strict=True))

@@ -37,6 +37,10 @@ class ExtractorConfig:
             KV cache, so this bounds memory. More fields run in further chunks
             that reuse the single prefix encode.
         close: Value close token (``'box_end'`` or the ``'im_end'`` fallback).
+        early_stop: End a branch once it can no longer be ``'ok'``: an array
+            that is no JSON array prefix, or a value stuck in a loop (see
+            :mod:`~l2r4kie.model.early_stop`). Such fields are reviewed
+            either way; this only saves the decode steps.
     """
 
     model: str = DEFAULT_MODEL
@@ -46,6 +50,7 @@ class ExtractorConfig:
     max_value_tokens: int = DEFAULT_MAX_VALUE_TOKENS
     max_branches: int = 64
     close: CloseToken = 'box_end'
+    early_stop: bool = True
 
     def __post_init__(self) -> None:
         if self.precision not in ('bfloat16', 'float32'):
