@@ -13,7 +13,7 @@ import torch
 from tiny import HIDDEN, VOCAB, tiny_model
 
 from l2r4kie.data.types import FieldRequest, FieldSpec
-from l2r4kie.model.decode import TOKEN_STATS, DecodeResult, decode_prefix, extract
+from l2r4kie.model.decode import TOKEN_STATS, DecodeResult, decode_prefix, extract, sample_prefix
 from l2r4kie.model.extractor import Extractor, ExtractorConfig
 from l2r4kie.model.format import EncodedBranch, KevFormat
 from l2r4kie.model.packing import Packed, pack, prefix_positions
@@ -102,6 +102,35 @@ def test_duplicate_ids_are_rejected(processor) -> None:  # noqa: ANN001
     extractor = make_extractor(processor)
     with pytest.raises(ValueError, match='Duplicate'):
         decode_prefix(extractor, text_prefix(extractor), [FieldRequest('/a'), FieldRequest('/a')])
+
+
+def test_sampling_gives_copies_per_field_reproducibly(processor) -> None:  # noqa: ANN001
+    extractor = make_extractor(processor, max_branches=4)  # 3 fields x 3 copies: three chunks
+    banned = set(extractor.format.banned_ids(VOCAB))
+    prefix = text_prefix(extractor)
+    a = sample_prefix(extractor, prefix, requests(), 3, seed=1, max_value_tokens=6)
+    assert [[c.field_id for c in field] for field in a] == [[r.id] * 3 for r in requests()]
+    assert not {t for field in a for c in field for t in extractor.format.tokenizer(c.text)['input_ids']} & banned
+    b = sample_prefix(extractor, prefix, requests(), 3, seed=1, max_value_tokens=6)
+    assert [[c.text for c in f] for f in a] == [[c.text for c in f] for f in b]
+    c = sample_prefix(extractor, prefix, requests(), 3, seed=2, max_value_tokens=6)
+    assert [[x.text for x in f] for f in a] != [[x.text for x in f] for f in c]
+
+
+def test_sampling_at_low_temperature_is_greedy(processor) -> None:  # noqa: ANN001
+    extractor = make_extractor(processor)
+    prefix = text_prefix(extractor)
+    greedy = decode_prefix(extractor, prefix, requests(), max_value_tokens=6)
+    sampled = sample_prefix(extractor, prefix, requests(), 2, temperature=1e-6, max_value_tokens=6)
+    assert [[c.text for c in field] for field in sampled] == [[g.text] * 2 for g in greedy]
+
+
+def test_sampling_arguments_are_validated(processor) -> None:  # noqa: ANN001
+    extractor = make_extractor(processor)
+    with pytest.raises(ValueError, match='copies'):
+        sample_prefix(extractor, text_prefix(extractor), requests(), 0)
+    with pytest.raises(ValueError, match='temperature'):
+        sample_prefix(extractor, text_prefix(extractor), requests(), 2, temperature=0)
 
 
 # --------------------------------------------- equivalence with teacher forcing

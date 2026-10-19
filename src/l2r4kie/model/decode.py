@@ -13,7 +13,8 @@ exactly what training saw:
    is masked out and does not shift positions.
 4. Tokens are chosen greedily from logits where every special token except
    the close marker is masked out, so a value is plain text ended by
-   the close marker or by the token budget.
+   the close marker or by the token budget. :func:`sample_prefix` draws them
+   from the same masked logits instead, to get several candidates per field.
 5. With ``early_stop`` (the default), a branch also ends as soon as it can no
    longer be ``'ok'`` (see :mod:`~l2r4kie.model.early_stop`); the others are
    untouched.
@@ -204,18 +205,73 @@ def decode_prefix(extractor: Extractor, prefix: Mapping[str, torch.Tensor], requ
         ValueError: On duplicate field ids, a non-positive budget or a layer
             index outside ``[0, num_hidden_layers]``.
     """
-    ids = [r.id for r in requests]
-    if len(set(ids)) != len(ids):
-        raise ValueError(f'Duplicate field ids in request: {sorted({i for i in ids if ids.count(i) > 1})}')
-    limit = extractor.config.max_value_tokens if max_value_tokens is None else max_value_tokens
-    if limit < 1:
-        raise ValueError(f'max_value_tokens must be positive, got {limit}')
+    limit = _budget(extractor, requests, max_value_tokens)
     depth = extractor.core.config.text_config.num_hidden_layers
     if any(not 0 <= layer <= depth for layer in layers):
         raise ValueError(f'layers must lie in [0, {depth}], got {list(layers)}')
     if not requests:
         return []
     stop = extractor.config.early_stop if early_stop is None else early_stop
+    return _decode_requests(extractor, prefix, requests, limit, trace, tuple(layers), stop)
+
+
+@torch.inference_mode()
+def sample_prefix(extractor: Extractor, prefix: Mapping[str, torch.Tensor], requests: Sequence[FieldRequest],
+                  copies: int, *, temperature: float = 1., seed: int = 0, max_value_tokens: int | None = None,
+                  early_stop: bool | None = None) -> list[list[DecodeResult]]:
+    """Sample ``copies`` values per field over an already encoded prefix.
+
+    Each candidate is an independent draw from the extractor's distribution
+    at ``temperature``, over the same masked logits as greedy decoding (so a
+    candidate is plain text too). The copies of all fields share one prefix
+    forward and are batched like distinct fields. No traces or layers.
+
+    Args:
+        extractor: Loaded model and format.
+        prefix: Processor outputs on the model device (see :func:`decode_prefix`).
+        requests: Fields to sample; ids must be unique.
+        copies: Candidates per field.
+        temperature: Softmax temperature (> 0).
+        seed: Seed of the sampling generator (on the model device).
+        max_value_tokens: Decode budget per candidate (see :func:`extract`).
+        early_stop: See :func:`extract`.
+
+    Returns:
+        ``copies`` results per request, in request order.
+
+    Raises:
+        ValueError: On duplicate field ids, a non-positive budget, ``copies``
+            below 1 or a non-positive temperature.
+    """
+    limit = _budget(extractor, requests, max_value_tokens)
+    if copies < 1:
+        raise ValueError(f'copies must be at least 1, got {copies}')
+    if not temperature > 0:
+        raise ValueError(f'temperature must be positive, got {temperature}')
+    if not requests:
+        return []
+    stop = extractor.config.early_stop if early_stop is None else early_stop
+    generator = torch.Generator(device=extractor.device).manual_seed(seed)
+    repeated = [r for r in requests for _ in range(copies)]
+    results = _decode_requests(extractor, prefix, repeated, limit, False, (), stop, temperature, generator)
+    return [results[i:i + copies] for i in range(0, len(results), copies)]
+
+
+def _budget(extractor: Extractor, requests: Sequence[FieldRequest], max_value_tokens: int | None) -> int:
+    """Check field ids are unique; return the decode budget."""
+    ids = [r.id for r in requests]
+    if len(set(ids)) != len(ids):
+        raise ValueError(f'Duplicate field ids in request: {sorted({i for i in ids if ids.count(i) > 1})}')
+    limit = extractor.config.max_value_tokens if max_value_tokens is None else max_value_tokens
+    if limit < 1:
+        raise ValueError(f'max_value_tokens must be positive, got {limit}')
+    return limit
+
+
+def _decode_requests(extractor: Extractor, prefix: Mapping[str, torch.Tensor], requests: Sequence[FieldRequest],
+                     limit: int, trace: bool, layers: tuple[int, ...], early_stop: bool, temperature: float = 0.,
+                     generator: torch.Generator | None = None) -> list[DecodeResult]:
+    """Run the prefix once, then decode ``requests`` in chunks of ``max_branches``."""
     extractor.model.eval()
     positions = prefix_positions(extractor.core, prefix)
     base = int(positions.max()) + 1
@@ -227,7 +283,8 @@ def decode_prefix(extractor: Extractor, prefix: Mapping[str, torch.Tensor], requ
         last = start + chunk >= len(requests)
         cache = prefill.past_key_values if last else copy.deepcopy(prefill.past_key_values)
         results.extend(_decode_chunk(extractor, cache, base, prefix['input_ids'].shape[1],
-                                     requests[start:start + chunk], limit, trace, tuple(layers), stop))
+                                     requests[start:start + chunk], limit, trace, layers, early_stop,
+                                     temperature, generator))
     return results
 
 
@@ -270,8 +327,8 @@ def _forward(core: torch.nn.Module, cache: Any, state: dict[str, bool], **inputs
 
 
 def _decode_chunk(extractor: Extractor, cache: Any, base: int, shared: int, requests: Sequence[FieldRequest],
-                  limit: int, trace: bool, layers: tuple[int, ...] = (),
-                  early_stop: bool = False) -> list[DecodeResult]:
+                  limit: int, trace: bool, layers: tuple[int, ...] = (), early_stop: bool = False,
+                  temperature: float = 0., generator: torch.Generator | None = None) -> list[DecodeResult]:
     """Decode up to ``max_branches`` fields in one batch over a prefix cache.
 
     Args:
@@ -284,6 +341,9 @@ def _decode_chunk(extractor: Extractor, cache: Any, base: int, shared: int, requ
         trace: Record per-token traces.
         layers: ``hidden_states`` indices of the extra marker states.
         early_stop: Stop branches that can no longer be ``'ok'``.
+        temperature: 0 decodes greedily; above 0, tokens are sampled at
+            this temperature with ``generator``.
+        generator: Random generator of the sampling (model device).
     """
     fmt, core, lm_head, device = extractor.format, extractor.core, extractor.lm_head, extractor.device
     n = len(requests)
@@ -340,7 +400,12 @@ def _decode_chunk(extractor: Extractor, cache: Any, base: int, shared: int, requ
     for step in range(limit):
         logits = lm_head(hidden)
         logits[:, banned] = torch.finfo(logits.dtype).min
-        chosen = logits.argmax(-1).masked_fill(finished, pad)
+        if temperature > 0:
+            probabilities = torch.softmax(logits.float() / temperature, -1)
+            chosen = torch.multinomial(probabilities, 1, generator=generator)[:, 0]
+        else:
+            chosen = logits.argmax(-1)
+        chosen = chosen.masked_fill(finished, pad)
         stats = token_stats(logits, chosen, allowed, close) if trace else None
         attention = torch.cat([attention, torch.ones((len(active), 1), dtype=torch.long, device=device)], -1)
         step_positions = (base + lengths + step)[None, :, None].expand(3, -1, -1)
