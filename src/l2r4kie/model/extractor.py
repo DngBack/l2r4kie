@@ -41,6 +41,15 @@ class ExtractorConfig:
             that is no JSON array prefix, or a value stuck in a loop (see
             :mod:`~l2r4kie.model.early_stop`). Such fields are reviewed
             either way; this only saves the decode steps.
+        merge_adapter: Fold the LoRA weights into the base weights after
+            loading. A decode step then runs about 4x faster (no extra LoRA
+            matmuls), but bfloat16 rounding of the merged weights changes
+            numerics slightly: values and confidences are not bit-identical
+            to the unmerged model the confidence head was cached on.
+        fast_decode: Generate values without traces, the last few branches
+            on a CUDA graph, then trace them in one teacher-forced pass
+            (:mod:`~l2r4kie.model.fast_decode`). Greedy and early stop as
+            usual; bfloat16 values may differ where kernels break a near tie.
     """
 
     model: str = DEFAULT_MODEL
@@ -51,6 +60,8 @@ class ExtractorConfig:
     max_branches: int = 64
     close: CloseToken = 'box_end'
     early_stop: bool = True
+    merge_adapter: bool = False
+    fast_decode: bool = False
 
     def __post_init__(self) -> None:
         if self.precision not in ('bfloat16', 'float32'):
@@ -107,6 +118,8 @@ class Extractor:
 
             path = Path(adapter)
             model = PeftModel.from_pretrained(model, str(path / 'adapter' if (path / 'adapter').is_dir() else path))
+            if config.merge_adapter:
+                model = model.merge_and_unload()
         model.to(config.device).eval()
         return cls(model, processor, KevFormat(processor.tokenizer, config.close), config)
 

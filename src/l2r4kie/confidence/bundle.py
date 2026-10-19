@@ -8,7 +8,8 @@ A bundle is one family folder written by :mod:`l2r4kie.pipelines.finalize`::
     shape_rules.json            optional value-shape rules (:mod:`.shapes`), if the
                                 threshold was fitted with them
     bundle.json                 extractor fingerprint, cached layers, max_trace_tokens,
-                                and whether shape rules are part of the policy
+                                whether shape rules are part of the policy, and the
+                                decode settings of its caches (``serving``)
 
 Serving decodes with ``trace=True`` and the bundle's layers, builds the same
 trace records as ``cache-traces`` (:func:`~l2r4kie.confidence.features.trace_record`),
@@ -19,7 +20,7 @@ cached one for the same document (checked in ``tests/test_pipelines.py``).
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,7 @@ import torch
 from ..data.types import FieldRequest
 from ..model.decode import DecodeResult
 from ..utils.io import PathLike, read_json
+from .cache import SERVING_KEYS
 from .calibration import probabilities
 from .features import TraceStore, trace_record
 from .heads import Head, load_head, score_head
@@ -49,6 +51,8 @@ class ConfidenceBundle:
         max_trace_tokens: Token states kept per field (as in the cache).
         shape_rules: Value-shape rules whose violations are mandatory reviews
             (``None``: the policy was fitted without them).
+        serving: Extractor settings (:data:`~.cache.SERVING_KEYS`) the caches
+            were decoded with; serving must use the same.
     """
 
     folder: Path
@@ -59,6 +63,7 @@ class ConfidenceBundle:
     layers: tuple[int, ...]
     max_trace_tokens: int
     shape_rules: ShapeRules | None = None
+    serving: dict[str, bool] = field(default_factory=lambda: dict.fromkeys(SERVING_KEYS, False))
 
     @classmethod
     def load(cls, folder: PathLike, device: str | torch.device = 'cpu') -> ConfidenceBundle:
@@ -74,7 +79,8 @@ class ConfidenceBundle:
         rules = ShapeRules.from_dict(read_json(folder / 'shape_rules.json')) if meta.get('shape_rules') else None
         return cls(folder, load_head(folder, device), read_json(folder / 'calibration.json'),
                    ReviewPolicy.from_dict(read_json(folder / 'review_policy.json')), meta['source_fingerprint'],
-                   tuple(meta.get('layers') or ()), int(meta.get('max_trace_tokens', 512)), rules)
+                   tuple(meta.get('layers') or ()), int(meta.get('max_trace_tokens', 512)), rules,
+                   {k: bool((meta.get('serving') or {}).get(k, False)) for k in SERVING_KEYS})
 
     def check_source(self, fingerprint: str) -> None:
         """Refuse an extractor other than the one the head was trained on.

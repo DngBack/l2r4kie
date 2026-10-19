@@ -103,6 +103,7 @@ def _infer(args: argparse.Namespace) -> int:
     from .pipelines.infer import infer_file
 
     bundle = None
+    serving = {'merge_adapter': args.merge_adapter, 'fast_decode': args.fast_decode}
     if args.confidence:
         from .confidence.bundle import ConfidenceBundle
         from .pipelines.predict import adapter_fingerprint
@@ -110,9 +111,15 @@ def _infer(args: argparse.Namespace) -> int:
         bundle = ConfidenceBundle.load(args.confidence)
         # Checked before loading the model: a head of another extractor would give meaningless scores.
         bundle.check_source(adapter_fingerprint(args.adapter) or 'zero-shot base model')
+        # The bundle's caches fix how values are decoded; asking for another decode is an error.
+        asked = [k for k, v in serving.items() if v and not bundle.serving[k]]
+        if asked:
+            print(f'error: {args.confidence} was cached without {asked}', file=sys.stderr)
+            return 2
+        serving = bundle.serving
     config = ExtractorConfig(model=args.model, device=args.device, precision=args.precision,
                              max_pixels=args.max_pixels, max_value_tokens=args.max_value_tokens,
-                             max_branches=args.max_branches, close=args.close)
+                             max_branches=args.max_branches, close=args.close, **serving)
     response = infer_file(Extractor.load(config, args.adapter), args.request, args.output, bundle)
     counts: dict[str, int] = {}
     for status in response['status'].values():
@@ -225,13 +232,15 @@ def _cache_traces(args: argparse.Namespace) -> int:
     # Resolved and checked for training documents before the model is loaded.
     cohorts = resolve_cohorts(config.cohort_plan, selection, args.split, extractor_config.train_documents)
     fingerprint = adapter_fingerprint(config.adapter)
-    extractor = Extractor.load(dataclasses.replace(extractor_config.extractor(), device=config.device),
+    serving = {'merge_adapter': config.merge_adapter, 'fast_decode': config.fast_decode}
+    extractor = Extractor.load(dataclasses.replace(extractor_config.extractor(), device=config.device, **serving),
                                config.adapter)
     for split, documents in cohorts.items():
         cache_traces(extractor, documents, config.cache, split, config.fields_per_document,
                      config.max_value_tokens, config.layers, config.max_trace_tokens,
                      {'adapter': config.adapter, 'source_fingerprint': fingerprint,
-                      'cohort_plan': config.cohort_plan, 'extractor_config': config.extractor},
+                      'cohort_plan': config.cohort_plan, 'extractor_config': config.extractor,
+                      **{k: v for k, v in serving.items() if v}},  # unset: False, as in older caches
                      config.part_size)
     return 0
 
@@ -383,6 +392,12 @@ def build_parser() -> argparse.ArgumentParser:
                      help='fields decoded together; bounds KV-cache memory (default: 64)')
     run.add_argument('--close', choices=['box_end', 'im_end'], default='box_end',
                      help='token closing a value (default: box_end)')
+    run.add_argument('--merge-adapter', action='store_true',
+                     help='merge the LoRA weights into the base model (about 2x faster decode, slightly different '
+                          'bfloat16 numerics); with --confidence, the bundle decides')
+    run.add_argument('--fast-decode', action='store_true',
+                     help='generate without traces (tail on a CUDA graph), then trace in one pass; '
+                          'with --confidence, the bundle decides')
     run.add_argument('--confidence', metavar='BUNDLE',
                      help='frozen confidence bundle (a heads/<family>/ folder after finalize): fills '
                           'confidence and adds the review queue; must belong to --adapter')

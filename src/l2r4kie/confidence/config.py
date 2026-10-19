@@ -127,6 +127,11 @@ class ConfidenceConfig:
         part_size: Documents per resumable cache part.
         target_error_recall: Share of wrong values the policy must catch.
         risk_replicates: Bootstrap draws of the risk-validation lower bound.
+        merge_adapter: Decode with the LoRA adapter merged into the base
+            weights (faster; see :class:`~l2r4kie.model.extractor.ExtractorConfig`).
+            Recorded in the caches and bundles, and applied when serving.
+        fast_decode: Decode with :mod:`~l2r4kie.model.fast_decode` (recorded
+            and applied like ``merge_adapter``).
         shape_rules: Make values that break their field's shape rule
             (:mod:`.shapes`, learnt from the extractor's training labels)
             mandatory reviews when fitting the threshold (``finalize``).
@@ -146,6 +151,8 @@ class ConfidenceConfig:
     part_size: int = 16
     target_error_recall: float = .95
     risk_replicates: int = 2000
+    merge_adapter: bool = False
+    fast_decode: bool = False
     shape_rules: bool = False
     heads: HeadTraining = field(default_factory=HeadTraining)
 

@@ -185,6 +185,7 @@ def test_select_finalize_audit_and_serving_parity(run: SimpleNamespace, with_sha
     folder = out / 'heads' / frozen['primary']
     bundle = ConfidenceBundle.load(folder)
     assert (bundle.shape_rules is not None) == with_shapes
+    assert bundle.serving == {'merge_adapter': False, 'fast_decode': False} == frozen['serving']
     bundle.check_source('fp')
     with pytest.raises(ValueError, match='trained on extractor'):
         bundle.check_source('other')
@@ -224,6 +225,27 @@ def test_audit_refuses_a_changed_bundle(run: SimpleNamespace) -> None:
     policy.write_text(policy.read_text().replace('"threshold"', '"threshold" ', 1))
     with pytest.raises(ValueError, match='changed after freezing'):
         audit(out)
+
+
+def test_audit_refuses_traces_decoded_differently(run: SimpleNamespace) -> None:
+    out = Path(run.config.output)
+    select_heads(run.config)
+    finalize(out, replicates=100)
+    path = Path(run.config.cache) / 'audit.pt'
+    cache = torch.load(path, weights_only=True)
+    cache['metadata']['merge_adapter'] = True
+    torch.save(cache, path)
+    with pytest.raises(ValueError, match='decoded with'):
+        audit(out)
+
+
+def test_caches_decoded_differently_are_not_mixed() -> None:
+    from l2r4kie.confidence.cache import serving_settings
+
+    caches = {s: SimpleNamespace(metadata={'merge_adapter': s == 'dev'}) for s in ('dev', 'risk_validation')}
+    with pytest.raises(ValueError, match='different settings'):
+        serving_settings(caches)
+    assert serving_settings({'dev': SimpleNamespace(metadata={})}) == {'merge_adapter': False, 'fast_decode': False}
 
 
 def test_audit_intervals_and_paired_systems() -> None:

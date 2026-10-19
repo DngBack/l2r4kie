@@ -19,6 +19,10 @@ exactly what training saw:
    longer be ``'ok'`` (see :mod:`~l2r4kie.model.early_stop`); the others are
    untouched.
 
+With ``ExtractorConfig.fast_decode``, :func:`decode_prefix` instead generates
+the tokens without traces (the tail on a CUDA graph) and traces them in one
+teacher-forced pass (:mod:`~l2r4kie.model.fast_decode`).
+
 Signals are the hidden states of the last layer (``h_key`` at ``key_close``,
 ``h_decide`` at ``value_open``, ``h_value`` after feeding the close marker);
 they equal the teacher-forced states of :func:`~l2r4kie.model.packing.pack`
@@ -212,6 +216,10 @@ def decode_prefix(extractor: Extractor, prefix: Mapping[str, torch.Tensor], requ
     if not requests:
         return []
     stop = extractor.config.early_stop if early_stop is None else early_stop
+    if extractor.config.fast_decode:
+        from .fast_decode import fast_decode_prefix
+
+        return fast_decode_prefix(extractor, prefix, requests, limit, trace, tuple(layers), stop)
     return _decode_requests(extractor, prefix, requests, limit, trace, tuple(layers), stop)
 
 

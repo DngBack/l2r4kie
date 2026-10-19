@@ -26,7 +26,7 @@ from typing import Any
 
 import numpy as np
 
-from ..confidence.cache import load_cache
+from ..confidence.cache import SERVING_KEYS, load_cache, serving_settings
 from ..confidence.calibration import calibrate
 from ..confidence.heads import load_head
 from ..confidence.policy import ReviewPolicy
@@ -110,7 +110,8 @@ def audit(output: PathLike, cache: PathLike | None = None, cohort_plan: PathLike
 
     Raises:
         ValueError: If not frozen, already audited, a bundle changed, the
-            audit cache comes from another extractor, or overlaps a development cohort.
+            audit cache comes from another extractor or decode (``serving``),
+            or overlaps a development cohort.
     """
     out = Path(output)
     frozen = read_json(out / 'frozen.json')
@@ -120,6 +121,10 @@ def audit(output: PathLike, cache: PathLike | None = None, cohort_plan: PathLike
     data = load_cache(cache, 'audit')
     if data.metadata.get('source_fingerprint') != frozen['source_fingerprint']:
         raise ValueError('Audit traces come from another extractor than the frozen heads')
+    frozen_serving = frozen.get('serving', dict.fromkeys(SERVING_KEYS, False))  # older bundles: the old decode
+    if serving_settings({'audit': data}) != frozen_serving:
+        raise ValueError(f'Audit traces were decoded with {serving_settings({"audit": data})}, '
+                         f'the frozen heads with {frozen_serving}')
     for split in ('train', 'dev', 'calibration', 'risk_validation'):
         if data.documents & load_cache(cache, split).documents:
             raise ValueError(f'Audit overlaps the {split} cohort')

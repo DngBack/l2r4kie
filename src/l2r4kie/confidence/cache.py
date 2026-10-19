@@ -129,6 +129,23 @@ def check_disjoint(caches: Mapping[str, TraceCache]) -> None:
                 raise ValueError(f'Document leakage between {a} and {b}: {len(shared)} documents')
 
 
+#: Extractor settings that change decoded values and traces without changing the adapter
+#: fingerprint; a bundle is served with the settings its caches were decoded with.
+SERVING_KEYS: tuple[str, ...] = ('merge_adapter', 'fast_decode')
+
+
+def serving_settings(caches: Mapping[str, TraceCache]) -> dict[str, bool]:
+    """The :data:`SERVING_KEYS` settings shared by all caches (missing: ``False``, the old decode).
+
+    Raises:
+        ValueError: If caches were decoded with different settings.
+    """
+    found = {tuple(bool(c.metadata.get(k, False)) for k in SERVING_KEYS) for c in caches.values()}
+    if len(found) != 1:
+        raise ValueError(f'Trace caches were decoded with different settings {SERVING_KEYS}: {sorted(found)}')
+    return dict(zip(SERVING_KEYS, found.pop(), strict=True))
+
+
 def check_source(caches: Mapping[str, TraceCache], fingerprint: str | None = None) -> str:
     """Return the extractor fingerprint shared by all caches.
 

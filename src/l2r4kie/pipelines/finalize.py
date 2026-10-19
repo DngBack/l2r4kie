@@ -36,7 +36,7 @@ from typing import Any
 
 import torch
 
-from ..confidence.cache import TraceCache, check_disjoint, check_source, load_cache
+from ..confidence.cache import TraceCache, check_disjoint, check_source, load_cache, serving_settings
 from ..confidence.calibration import calibrate, select_calibration
 from ..confidence.heads import Head, load_head, load_legacy_head, score_head
 from ..confidence.policy import fit_conservative_policy
@@ -148,6 +148,7 @@ def finalize(output: PathLike, cache: PathLike | None = None, target: float | No
     caches = {s: load_cache(cache, s) for s in ('train', 'dev', 'calibration', 'risk_validation')}
     check_disjoint(caches)
     source = check_source(caches, selection['source_fingerprint'])
+    serving = serving_settings(caches)
     meta = caches['risk_validation'].metadata
     layers = tuple(meta.get('layers') or ()) if layers is None else layers
     max_trace_tokens = meta.get('max_trace_tokens', 512) if max_trace_tokens is None else max_trace_tokens
@@ -164,6 +165,7 @@ def finalize(output: PathLike, cache: PathLike | None = None, target: float | No
     frozen: dict[str, Any] = {'primary': selection['primary'], 'source_fingerprint': source, 'cache': str(cache),
                               'target_error_recall': target, 'audit_seen': False, 'candidates': {},
                               'cohorts': {s: c.metadata.get('documents') for s, c in caches.items()},
+                              'serving': serving,
                               'shape_rules': None if shape_rules is None else
                               {'fields': len(shape_rules.allowed), 'source': shape_rules.source}}
     for family, result in results.items():
@@ -177,7 +179,7 @@ def finalize(output: PathLike, cache: PathLike | None = None, target: float | No
             (folder / 'shape_rules.json').unlink(missing_ok=True)
         write_json(folder / 'bundle.json', {'family': family, 'source_fingerprint': source, 'layers': list(layers),
                                             'max_trace_tokens': max_trace_tokens, 'target_error_recall': target,
-                                            'shape_rules': shape_rules is not None})
+                                            'shape_rules': shape_rules is not None, 'serving': serving})
         frozen['candidates'][family] = {
             'folder': str(folder), 'calibration': result['calibration'], 'policy': result['policy'].to_dict(),
             'bounds': result['bounds'], 'dev': compact(result['reports']['dev']),
