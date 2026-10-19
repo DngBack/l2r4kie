@@ -24,6 +24,10 @@ human at all::
      "review": [{"id": "/so_tien", "confidence": 0.41, "status": "ok",
                  "reason": "low_correctness_confidence", "priority": 0.59}, ...],
      "document_needs_review": true
+
+``reason`` is ``field_outside_evaluated_schema``, ``incomplete_or_invalid``,
+``field_shape_violation`` (the value has a shape its field never takes, with a
+bundle finalised with shape rules) or ``low_correctness_confidence``.
 """
 
 from __future__ import annotations
@@ -110,7 +114,7 @@ def infer(extractor: Extractor, request: Mapping[str, Any], root: PathLike | Non
         return build_response(extract(extractor, pages, requests))
     results = extract(extractor, pages, requests, trace=True, layers=bundle.layers)
     scores = bundle.score(results, requests, extractor.format.tokenizer)
-    return build_response(results, scores, bundle.review(results, scores))
+    return build_response(results, scores, bundle.review(results, scores, requests))
 
 
 def infer_file(extractor: Extractor, request: PathLike, output: PathLike,

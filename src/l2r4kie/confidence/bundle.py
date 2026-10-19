@@ -5,7 +5,10 @@ A bundle is one family folder written by :mod:`l2r4kie.pipelines.finalize`::
     head.pt, head_config.json   the head
     calibration.json            logit calibration (calibration cohort)
     review_policy.json          review threshold (risk_validation cohort)
-    bundle.json                 extractor fingerprint, cached layers, max_trace_tokens
+    shape_rules.json            optional value-shape rules (:mod:`.shapes`), if the
+                                threshold was fitted with them
+    bundle.json                 extractor fingerprint, cached layers, max_trace_tokens,
+                                and whether shape rules are part of the policy
 
 Serving decodes with ``trace=True`` and the bundle's layers, builds the same
 trace records as ``cache-traces`` (:func:`~l2r4kie.confidence.features.trace_record`),
@@ -29,6 +32,7 @@ from .calibration import probabilities
 from .features import TraceStore, trace_record
 from .heads import Head, load_head, score_head
 from .policy import ReviewPolicy, queue_fields
+from .shapes import ShapeRules
 
 
 @dataclass
@@ -43,6 +47,8 @@ class ConfidenceBundle:
         source_fingerprint: Fingerprint of the extractor the head was trained on.
         layers: Intermediate ``hidden_states`` indices the head may read.
         max_trace_tokens: Token states kept per field (as in the cache).
+        shape_rules: Value-shape rules whose violations are mandatory reviews
+            (``None``: the policy was fitted without them).
     """
 
     folder: Path
@@ -52,19 +58,23 @@ class ConfidenceBundle:
     source_fingerprint: str
     layers: tuple[int, ...]
     max_trace_tokens: int
+    shape_rules: ShapeRules | None = None
 
     @classmethod
     def load(cls, folder: PathLike, device: str | torch.device = 'cpu') -> ConfidenceBundle:
         """Read a bundle folder.
 
         Raises:
-            FileNotFoundError: If a bundle file is missing (e.g. a folder not finalised).
+            FileNotFoundError: If a bundle file is missing (e.g. a folder not
+                finalised, or ``shape_rules.json`` of a policy fitted with them).
         """
         folder = Path(folder)
         meta = read_json(folder / 'bundle.json')
+        # Without its rules, a threshold fitted next to them would accept the values they review.
+        rules = ShapeRules.from_dict(read_json(folder / 'shape_rules.json')) if meta.get('shape_rules') else None
         return cls(folder, load_head(folder, device), read_json(folder / 'calibration.json'),
                    ReviewPolicy.from_dict(read_json(folder / 'review_policy.json')), meta['source_fingerprint'],
-                   tuple(meta.get('layers') or ()), int(meta.get('max_trace_tokens', 512)))
+                   tuple(meta.get('layers') or ()), int(meta.get('max_trace_tokens', 512)), rules)
 
     def check_source(self, fingerprint: str) -> None:
         """Refuse an extractor other than the one the head was trained on.
@@ -107,7 +117,17 @@ class ConfidenceBundle:
             scores[i] = p
         return scores
 
-    def review(self, results: Sequence[DecodeResult], scores: Sequence[float | None]) -> list[dict[str, Any]]:
-        """Review queue of a document, most urgent first (see :func:`~.policy.queue_fields`)."""
-        return queue_fields([{'id': r.field_id, 'confidence': s, 'status': r.status}
-                             for r, s in zip(results, scores, strict=True)], self.policy)
+    def review(self, results: Sequence[DecodeResult], scores: Sequence[float | None],
+               requests: Sequence[FieldRequest]) -> list[dict[str, Any]]:
+        """Review queue of a document, most urgent first (see :func:`~.policy.queue_fields`).
+
+        Args:
+            results: Decode results.
+            scores: :meth:`score` output.
+            requests: The field requests (their kinds decide which shape rules apply).
+        """
+        rules = self.shape_rules
+        return queue_fields([{'id': r.field_id, 'confidence': s, 'status': r.status,
+                              'shape_violation': rules is not None and rules.violates(r.field_id, q.kind, r.value,
+                                                                                      r.status)}
+                             for r, s, q in zip(results, scores, requests, strict=True)], self.policy)

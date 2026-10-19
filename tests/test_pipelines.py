@@ -18,6 +18,7 @@ import torch
 
 from l2r4kie.confidence.bundle import ConfidenceBundle
 from l2r4kie.confidence.config import ConfidenceConfig, GridEntry, HeadTraining
+from l2r4kie.confidence.shapes import ShapeRules
 from l2r4kie.data.cohorts import CohortPlan
 from l2r4kie.data.selection import Selection
 from l2r4kie.data.types import Document, FieldSpec
@@ -139,8 +140,11 @@ def test_cache_traces_writes_rows_records_and_merges_parts(run: SimpleNamespace)
                      provenance={'source_fingerprint': 'fp'}, part_size=7)
 
 
-def test_select_finalize_audit_and_serving_parity(run: SimpleNamespace) -> None:
+@pytest.mark.parametrize('with_shapes', [False, True])
+def test_select_finalize_audit_and_serving_parity(run: SimpleNamespace, with_shapes: bool) -> None:
     config = run.config
+    # Wrong fake values end in an extra letter ('v12' -> 'v12x'), a shape no training label has.
+    rules = ShapeRules.fit(run.documents['train']) if with_shapes else None
     out = Path(config.output)
     selection = select_heads(config, 'fp')
     families = set(selection['families'])
@@ -152,9 +156,13 @@ def test_select_finalize_audit_and_serving_parity(run: SimpleNamespace) -> None:
 
     dry = finalize(out, dry_run=True, replicates=200)
     assert not (out / 'frozen.json').exists() and set(dry['candidates']) == families
-    finalize(out, replicates=200, layers=config.layers, max_trace_tokens=config.max_trace_tokens)
+    finalize(out, replicates=200, layers=config.layers, max_trace_tokens=config.max_trace_tokens,
+             shape_rules=rules)
     frozen = read_json(out / 'frozen.json')
     assert frozen['source_fingerprint'] == 'fp' and not frozen['audit_seen']
+    assert (frozen['shape_rules'] is not None) == with_shapes
+    primary_folder = out / 'heads' / frozen['primary']
+    assert (primary_folder / 'shape_rules.json').is_file() == with_shapes
     with pytest.raises(ValueError, match='already frozen'):
         finalize(out)
 
@@ -168,12 +176,15 @@ def test_select_finalize_audit_and_serving_parity(run: SimpleNamespace) -> None:
     assert primary['versus_baseline']['baseline_review_rate'] == 1.
     assert primary['versus_baseline']['review_rate_change'] <= 0
     assert set(report['paired_versus_primary']) == families - {frozen['primary']}
+    if with_shapes:
+        assert primary['review']['mandatory_review'] > sum(r['status'] != 'ok' for r in rows)
     with pytest.raises(ValueError, match='already audited'):
         audit(out)
 
     # Serving: the same document through infer gives the audited confidences and review decisions.
     folder = out / 'heads' / frozen['primary']
     bundle = ConfidenceBundle.load(folder)
+    assert (bundle.shape_rules is not None) == with_shapes
     bundle.check_source('fp')
     with pytest.raises(ValueError, match='trained on extractor'):
         bundle.check_source('other')
@@ -192,7 +203,16 @@ def test_select_finalize_audit_and_serving_parity(run: SimpleNamespace) -> None:
             assert response['confidence'][field.id] == pytest.approx(expected['confidence'], abs=1e-6)
         assert (field.id in reviewed) == expected['needs_review']
     assert response['document_needs_review'] == bool(reviewed)
+    reasons = {item['id']: item['reason'] for item in response['review']}
+    for field in document.fields:
+        expected = audited[(document.id, field.id)]
+        assert (reasons.get(field.id) == 'field_shape_violation') == expected.get('shape_violation', False)
     json.dumps(response)
+
+    if with_shapes:  # a policy fitted with shape rules is never served without them
+        (folder / 'shape_rules.json').unlink()
+        with pytest.raises(FileNotFoundError):
+            ConfidenceBundle.load(folder)
 
 
 def test_audit_refuses_a_changed_bundle(run: SimpleNamespace) -> None:

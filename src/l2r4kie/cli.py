@@ -259,12 +259,12 @@ def _finalize(args: argparse.Namespace) -> int:
     if not args.config:
         print('error: finalize needs --config or --legacy-selection', file=sys.stderr)
         return 2
-    from .pipelines.finalize import finalize
+    from .pipelines.finalize import extractor_shape_rules, finalize
 
     config = _confidence_config(args)
     finalize(config.output, args.cache or config.cache, config.target_error_recall,
              args.replicates or config.risk_replicates, args.dry_run, config.layers, config.max_trace_tokens,
-             args.device)
+             args.device, extractor_shape_rules(config.extractor) if config.shape_rules else None)
     return 0
 
 

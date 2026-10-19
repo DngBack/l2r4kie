@@ -33,6 +33,35 @@ def test_policy_reviews_unfinished_unknown_and_low_confidence_fields() -> None:
     assert ReviewPolicy.from_dict({**policy.to_dict(), 'validation_bounds': {}}) == policy
 
 
+def test_shape_violations_are_mandatory_reviews() -> None:
+    policy = ReviewPolicy(.5)
+    assert policy.needs_review(.99, 'ok', '/a', shape_violation=True)
+    assert policy.is_mandatory(.99, 'ok', '/a', True) and not policy.is_mandatory(.99, 'ok', '/a')
+    assert review_reason(policy, .99, 'ok', '/a', True) == 'field_shape_violation'
+    assert review_reason(policy, .99, 'truncated', '/a', True) == 'incomplete_or_invalid'
+    queue = queue_fields([{'id': '/a', 'confidence': .99, 'status': 'ok', 'shape_violation': True},
+                          {'id': '/b', 'confidence': .2, 'status': 'ok'}], policy)
+    assert [(q['id'], q['reason'], q['priority']) for q in queue] == [
+        ('/a', 'field_shape_violation', 1.), ('/b', 'low_correctness_confidence', pytest.approx(.8))]
+
+
+def test_fits_and_metrics_count_shape_violations_as_mandatory() -> None:
+    # The two errors with the highest scores are flagged: the threshold no longer has to reach them.
+    rows = [row(i >= 2, document=f'd{i}') for i in range(10)] + [row(False, document='e0'), row(False, document='e1')]
+    scores = [.1, .2, .3, .4, .5, .6, .7, .8, .9, .95, .97, .99]
+    flagged = [{**r, 'shape_violation': i >= 10} for i, r in enumerate(rows)]
+    plain, ruled = fit_policy(rows, scores, 1.), fit_policy(flagged, scores, 1.)
+    assert plain.threshold > .99 and .2 < ruled.threshold < .3
+    report = evaluate_policy(flagged, scores, ruled)
+    assert report['error_recall'] == 1. and report['mandatory_review'] == 2 and report['reviewed_fields'] == 4
+    assert oracle_review_rate(flagged, scores, 1., ruled) == pytest.approx(4 / 12)
+    assert review_curve(flagged, scores)['maximum_valid_coverage'] == pytest.approx(10 / 12)
+    assert budgets(flagged, scores, (.34,))['0.34']['caught_errors'] == 4  # 2 flagged + the 2 lowest scores
+    risk, _ = fit_conservative_policy([{**r, 'document_id': f'r{i}'} for i, r in enumerate(flagged)], scores,
+                                      .5, replicates=200)
+    assert risk.threshold < REVIEW_ALL
+
+
 def test_queue_orders_mandatory_first_then_lowest_confidence() -> None:
     queue = queue_fields([{'id': '/a', 'confidence': .9, 'status': 'ok'},
                           {'id': '/b', 'confidence': .2, 'status': 'ok'},

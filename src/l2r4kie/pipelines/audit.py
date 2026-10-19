@@ -30,6 +30,7 @@ from ..confidence.cache import load_cache
 from ..confidence.calibration import calibrate
 from ..confidence.heads import load_head
 from ..confidence.policy import ReviewPolicy
+from ..confidence.shapes import ShapeRules
 from ..data.cohorts import CohortPlan
 from ..eval.review_metrics import (bootstrap_comparison, describe, evaluate_policy, within_field_auroc)
 from ..utils.io import PathLike, dumps_jsonl, read_json, read_jsonl, write_json
@@ -130,6 +131,7 @@ def audit(output: PathLike, cache: PathLike | None = None, cohort_plan: PathLike
     report: dict[str, Any] = {'primary': frozen['primary'], 'metadata': {
         k: v for k, v in data.metadata.items() if k not in ('timings_seconds', 'document_ids')},
         'frozen_before_audit': True, 'candidates': {}}
+    rows_by: dict[str, list[Mapping[str, Any]]] = {}
     flags_by: dict[str, list[bool]] = {}
     scores_by: dict[str, list[float | None]] = {}
     policies: dict[str, ReviewPolicy] = {}
@@ -141,37 +143,41 @@ def audit(output: PathLike, cache: PathLike | None = None, cohort_plan: PathLike
         logits = logits_of(head, data, device)
         policy = ReviewPolicy.from_dict(record['policy'])
         scores = data.scores(logits, record['calibration'])
-        flags = [policy.needs_review(s, r['status'], r['field_id']) for r, s in zip(data.rows, scores, strict=True)]
-        entry = compact(describe(data.rows, scores, calibrate(logits, record['calibration']).tolist(), policy))
-        entry['intervals_95'] = bootstrap_review(data.rows, flags)
+        audit_rows: list[Mapping[str, Any]] = data.rows
+        if read_json(folder / 'bundle.json').get('shape_rules'):
+            audit_rows = ShapeRules.from_dict(read_json(folder / 'shape_rules.json')).flag_rows(data.rows)
+        flags = [policy.needs_review(s, r['status'], r['field_id'], r.get('shape_violation', False))
+                 for r, s in zip(audit_rows, scores, strict=True)]
+        entry = compact(describe(audit_rows, scores, calibrate(logits, record['calibration']).tolist(), policy))
+        entry['intervals_95'] = bootstrap_review(audit_rows, flags)
         entry['within_field'] = within_field_auroc(data.valid_rows, logits.tolist())
         entry['subsets'] = {}
         for name, ids in subsets.items():
-            chosen = [i for i, r in enumerate(data.rows) if r['document_id'] in ids]
+            chosen = [i for i, r in enumerate(audit_rows) if r['document_id'] in ids]
             if chosen:
-                rows = [data.rows[i] for i in chosen]
+                rows = [audit_rows[i] for i in chosen]
                 entry['subsets'][name] = {**evaluate_policy(rows, [scores[i] for i in chosen], policy),
                                           'intervals_95': bootstrap_review(rows, [flags[i] for i in chosen])}
         if baseline is not None:
-            entry['versus_baseline'] = paired_systems(data.rows, flags, baseline,
+            entry['versus_baseline'] = paired_systems(audit_rows, flags, baseline,
                                                       [bool(r['needs_review']) for r in baseline])
             for name, ids in subsets.items():
-                chosen = [i for i, r in enumerate(data.rows) if r['document_id'] in ids]
+                chosen = [i for i, r in enumerate(audit_rows) if r['document_id'] in ids]
                 if chosen:
                     entry['versus_baseline_' + name] = paired_systems(
-                        [data.rows[i] for i in chosen], [flags[i] for i in chosen], baseline,
+                        [audit_rows[i] for i in chosen], [flags[i] for i in chosen], baseline,
                         [bool(r['needs_review']) for r in baseline])
         report['candidates'][family] = entry
-        flags_by[family], scores_by[family], policies[family] = flags, scores, policy
+        rows_by[family], flags_by[family], scores_by[family], policies[family] = audit_rows, flags, scores, policy
     primary = frozen['primary']
     report['paired_versus_primary'] = {
-        family: bootstrap_comparison(data.rows, scores_by[primary], scores_by[family], policies[primary],
+        family: bootstrap_comparison(rows_by[primary], scores_by[primary], scores_by[family], policies[primary],
                                      policies[family])
         for family in frozen['candidates'] if family != primary}
     write_json(out / 'audit_report.json', report)
     for family in frozen['candidates']:
         lines = [dumps_jsonl({**row, 'confidence': score, 'needs_review': flag})
-                 for row, score, flag in zip(data.rows, scores_by[family], flags_by[family], strict=True)]
+                 for row, score, flag in zip(rows_by[family], scores_by[family], flags_by[family], strict=True)]
         (out / 'heads' / family / 'audit_predictions.jsonl').write_text(''.join(lines), encoding='utf-8')
     print(json.dumps({family: {'review_rate': e['review']['review_rate'], 'error_recall': e['review']['error_recall'],
                                'intervals_95': e['intervals_95']} for family, e in report['candidates'].items()},

@@ -127,6 +127,9 @@ class ConfidenceConfig:
         part_size: Documents per resumable cache part.
         target_error_recall: Share of wrong values the policy must catch.
         risk_replicates: Bootstrap draws of the risk-validation lower bound.
+        shape_rules: Make values that break their field's shape rule
+            (:mod:`.shapes`, learnt from the extractor's training labels)
+            mandatory reviews when fitting the threshold (``finalize``).
         heads: Head training and grid.
     """
 
@@ -143,6 +146,7 @@ class ConfidenceConfig:
     part_size: int = 16
     target_error_recall: float = .95
     risk_replicates: int = 2000
+    shape_rules: bool = False
     heads: HeadTraining = field(default_factory=HeadTraining)
 
     def __post_init__(self) -> None:

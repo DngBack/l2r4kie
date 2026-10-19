@@ -1,8 +1,9 @@
 """Review policies: which extracted fields a person must check (old ``review``).
 
 A field is *reviewed* when its value did not finish (status not ``ok``), it
-has no confidence, its field id was never validated, or its calibrated
-confidence is below the threshold. Everything else is accepted automatically.
+has no confidence, its field id was never validated, its value breaks the
+field's shape rule (``shape_violation``, see :mod:`.shapes`), or its
+calibrated confidence is below the threshold. Everything else is accepted automatically.
 The goal is to catch at least ``target_error_recall`` of the wrong values
 while reviewing as few fields as possible.
 
@@ -44,14 +45,18 @@ class ReviewPolicy:
     mode: str = 'global'
     supported_fields: tuple[str, ...] = ()
 
-    def is_mandatory(self, confidence: float | None, status: str = 'ok', field_id: str | None = None) -> bool:
+    def is_mandatory(self, confidence: float | None, status: str = 'ok', field_id: str | None = None,
+                     shape_violation: bool = False) -> bool:
         """Whether the field is reviewed whatever its confidence."""
         unknown = bool(self.supported_fields) and field_id is not None and field_id not in self.supported_fields
-        return unknown or status != 'ok' or confidence is None or not math.isfinite(confidence)
+        return (unknown or shape_violation or status != 'ok' or confidence is None
+                or not math.isfinite(confidence))
 
-    def needs_review(self, confidence: float | None, status: str = 'ok', field_id: str | None = None) -> bool:
+    def needs_review(self, confidence: float | None, status: str = 'ok', field_id: str | None = None,
+                     shape_violation: bool = False) -> bool:
         """Whether a person must check this field."""
-        return self.is_mandatory(confidence, status, field_id) or confidence < self.threshold  # type: ignore[operator]
+        return (self.is_mandatory(confidence, status, field_id, shape_violation)
+                or confidence < self.threshold)  # type: ignore[operator]
 
     def to_dict(self) -> dict[str, Any]:
         """JSON form."""
@@ -66,7 +71,9 @@ class ReviewPolicy:
 
 
 def _usable(row: Mapping[str, Any], score: float | None) -> bool:
-    return row['status'] == 'ok' and score is not None and math.isfinite(score)
+    """Whether a threshold decides the row (not a mandatory review)."""
+    return (row['status'] == 'ok' and not row.get('shape_violation', False) and score is not None
+            and math.isfinite(score))
 
 
 def fit_policy(rows: Sequence[Mapping[str, Any]], scores: Sequence[float | None], target_error_recall: float = .95,
@@ -183,14 +190,17 @@ def fit_conservative_policy(rows: Sequence[Mapping[str, Any]], scores: Sequence[
                     'fallback': None if met else 'review_all'}
 
 
-def review_reason(policy: ReviewPolicy, confidence: float | None, status: str, field_id: str) -> str | None:
+def review_reason(policy: ReviewPolicy, confidence: float | None, status: str, field_id: str,
+                  shape_violation: bool = False) -> str | None:
     """Why a field is reviewed, or ``None`` if it is accepted."""
-    if not policy.needs_review(confidence, status, field_id):
+    if not policy.needs_review(confidence, status, field_id, shape_violation):
         return None
     if policy.supported_fields and field_id not in policy.supported_fields:
         return 'field_outside_evaluated_schema'
     if policy.is_mandatory(confidence, status, field_id):
         return 'incomplete_or_invalid'
+    if shape_violation:
+        return 'field_shape_violation'
     return 'low_correctness_confidence'
 
 
@@ -198,13 +208,13 @@ def queue_fields(results: Sequence[Mapping[str, Any]], policy: ReviewPolicy) -> 
     """Fields to review, most urgent first (mandatory reviews, then lowest confidence).
 
     Args:
-        results: ``{'id', 'confidence', 'status'}`` per field.
+        results: ``{'id', 'confidence', 'status', 'shape_violation'?}`` per field.
         policy: Frozen policy.
     """
     queue = []
     for row in results:
         confidence, status = row.get('confidence'), row.get('status', 'ok')
-        reason = review_reason(policy, confidence, status, row['id'])
+        reason = review_reason(policy, confidence, status, row['id'], row.get('shape_violation', False))
         if reason is not None:
             queue.append({'id': row['id'], 'confidence': confidence, 'status': status, 'reason': reason,
                           'priority': 1. if reason != 'low_correctness_confidence' else 1. - confidence})

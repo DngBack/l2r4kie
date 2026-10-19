@@ -9,6 +9,12 @@ Second half of the old ``train_experiment``. For every family kept by
    95% lower bounds of error recall reach the target
    (:func:`~l2r4kie.confidence.policy.fit_conservative_policy`).
 
+With shape rules (``shape_rules: true`` in the confidence config, see
+:mod:`~l2r4kie.confidence.shapes`), values breaking their field's rule are
+mandatory reviews before the threshold is fitted, so the head only has to
+catch the remaining errors; the rules are learnt from the extractor's
+training labels and stored in each bundle.
+
 Then everything is frozen (``frozen.json`` with file fingerprints) before the
 audit cohort is decoded or read. ``--dry-run`` computes and prints without
 writing. :func:`finalize_legacy` replays the same steps on an old selection
@@ -16,8 +22,8 @@ and cache, to check that calibration and policy were ported unchanged.
 
 Each family folder becomes a *confidence bundle* usable by ``infer
 --confidence``: ``head.pt``, ``head_config.json``, ``calibration.json``,
-``review_policy.json`` and ``bundle.json`` (extractor fingerprint, cached
-layers, trace settings).
+``review_policy.json``, ``shape_rules.json`` (with shape rules) and
+``bundle.json`` (extractor fingerprint, cached layers, trace settings).
 """
 
 from __future__ import annotations
@@ -34,13 +40,14 @@ from ..confidence.cache import TraceCache, check_disjoint, check_source, load_ca
 from ..confidence.calibration import calibrate, select_calibration
 from ..confidence.heads import Head, load_head, load_legacy_head, score_head
 from ..confidence.policy import fit_conservative_policy
+from ..confidence.shapes import ShapeRules
 from ..eval.review_metrics import describe
 from ..utils.io import PathLike, read_json, write_json
 from .head_selection import compact
 
 #: Files of a confidence bundle covered by its fingerprint.
 BUNDLE_FILES: tuple[str, ...] = ('head.pt', 'head_config.json', 'calibration.json', 'review_policy.json',
-                                 'bundle.json')
+                                 'shape_rules.json', 'bundle.json')
 
 
 def bundle_fingerprint(folder: PathLike) -> str:
@@ -60,16 +67,36 @@ def logits_of(head: Head, cache: TraceCache, device: str | torch.device = 'cpu')
     return score_head(head, cache.store(signals, device), [r['field_id'] for r in cache.valid_rows])
 
 
+def extractor_shape_rules(extractor_config: PathLike) -> ShapeRules:
+    """Shape rules learnt from the training documents of an extractor run config."""
+    from ..data.selection import Selection
+    from ..train.config import TrainConfig
+    from ..utils.config import load_config
+
+    config = TrainConfig.from_dict(load_config(extractor_config))
+    s = config.selection
+    selection = Selection(Path(s.prepared), s.seed, s.holdout_percent, s.forms, s.balanced_forms)
+    return ShapeRules.fit(selection.documents('train', config.train_documents),
+                          source=f'train labels of {extractor_config}')
+
+
 def calibrate_and_fit(head: Head, caches: Mapping[str, TraceCache], target: float, replicates: int,
-                      device: str | torch.device = 'cpu') -> dict[str, Any]:
-    """Calibration, risk policy and dev/risk reports of one head."""
+                      device: str | torch.device = 'cpu', shape_rules: ShapeRules | None = None) -> dict[str, Any]:
+    """Calibration, risk policy and dev/risk reports of one head.
+
+    With ``shape_rules``, their violations on dev and risk_validation are
+    mandatory reviews (calibration is unaffected: it only maps logits).
+    """
     logits = {split: logits_of(head, caches[split], device) for split in ('calibration', 'risk_validation', 'dev')}
     cal = caches['calibration']
     calibration = select_calibration(logits['calibration'], cal.labels, [r['document_id'] for r in cal.valid_rows])
+    rows = {split: shape_rules.flag_rows(caches[split].rows) if shape_rules else caches[split].rows
+            for split in ('dev', 'risk_validation')}
     risk = caches['risk_validation']
-    policy, bounds = fit_conservative_policy(risk.rows, risk.scores(logits['risk_validation'], calibration), target,
+    policy, bounds = fit_conservative_policy(rows['risk_validation'],
+                                             risk.scores(logits['risk_validation'], calibration), target,
                                              replicates=replicates)
-    reports = {split: describe(caches[split].rows, caches[split].scores(logits[split], calibration),
+    reports = {split: describe(rows[split], caches[split].scores(logits[split], calibration),
                                calibrate(logits[split], calibration).tolist(), policy)
                for split in ('dev', 'risk_validation')}
     return {'calibration': calibration, 'policy': policy, 'bounds': bounds, 'reports': reports}
@@ -88,7 +115,8 @@ def _summary(results: Mapping[str, Mapping[str, Any]], primary: str) -> dict[str
 
 def finalize(output: PathLike, cache: PathLike | None = None, target: float | None = None,
              replicates: int = 2000, dry_run: bool = False, layers: tuple[int, ...] | None = None,
-             max_trace_tokens: int | None = None, device: str | torch.device = 'cpu') -> dict[str, Any]:
+             max_trace_tokens: int | None = None, device: str | torch.device = 'cpu',
+             shape_rules: ShapeRules | None = None) -> dict[str, Any]:
     """Calibrate and threshold every family of ``<output>/selection.json``.
 
     Args:
@@ -101,6 +129,8 @@ def finalize(output: PathLike, cache: PathLike | None = None, target: float | No
             from the cache metadata).
         max_trace_tokens: Token states per field, recorded in each bundle.
         device: Where heads run.
+        shape_rules: Value-shape rules whose violations are mandatory reviews
+            (see :func:`extractor_shape_rules`); stored in every bundle.
 
     Returns:
         Short summary per family (thresholds, risk review rate and recall).
@@ -124,21 +154,30 @@ def finalize(output: PathLike, cache: PathLike | None = None, target: float | No
     results = {}
     for family in selection['families']:
         head = load_head(out / 'heads' / family, device)
-        results[family] = calibrate_and_fit(head, caches, target, replicates, device)
+        results[family] = calibrate_and_fit(head, caches, target, replicates, device, shape_rules)
     summary = _summary(results, selection['primary'])
+    if shape_rules is not None:
+        summary['shape_rules'] = len(shape_rules.allowed)
     print(json.dumps(summary, indent=2), flush=True)
     if dry_run:
         return summary
     frozen: dict[str, Any] = {'primary': selection['primary'], 'source_fingerprint': source, 'cache': str(cache),
                               'target_error_recall': target, 'audit_seen': False, 'candidates': {},
-                              'cohorts': {s: c.metadata.get('documents') for s, c in caches.items()}}
+                              'cohorts': {s: c.metadata.get('documents') for s, c in caches.items()},
+                              'shape_rules': None if shape_rules is None else
+                              {'fields': len(shape_rules.allowed), 'source': shape_rules.source}}
     for family, result in results.items():
         folder = out / 'heads' / family
         write_json(folder / 'calibration.json', result['calibration'])
         write_json(folder / 'review_policy.json', {**result['policy'].to_dict(), 'validation_bounds': result['bounds'],
                                                    'population_guarantee': False})
+        if shape_rules is not None:
+            write_json(folder / 'shape_rules.json', shape_rules.to_dict())
+        else:
+            (folder / 'shape_rules.json').unlink(missing_ok=True)
         write_json(folder / 'bundle.json', {'family': family, 'source_fingerprint': source, 'layers': list(layers),
-                                            'max_trace_tokens': max_trace_tokens, 'target_error_recall': target})
+                                            'max_trace_tokens': max_trace_tokens, 'target_error_recall': target,
+                                            'shape_rules': shape_rules is not None})
         frozen['candidates'][family] = {
             'folder': str(folder), 'calibration': result['calibration'], 'policy': result['policy'].to_dict(),
             'bounds': result['bounds'], 'dev': compact(result['reports']['dev']),

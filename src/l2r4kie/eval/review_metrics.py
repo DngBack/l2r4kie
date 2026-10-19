@@ -1,7 +1,8 @@
 """Workload and recall of review policies (old ``review`` + ``review_optimization``).
 
 A *review row* is one requested field with ``document_id``, ``field_id``,
-``status`` and ``correct``; *scores* are calibrated confidences aligned with
+``status``, ``correct`` and optionally ``shape_violation`` (a mandatory
+review, see :mod:`l2r4kie.confidence.shapes`); *scores* are calibrated confidences aligned with
 the rows (``None`` where there is none, e.g. a truncated value).
 
 New over the old reports:
@@ -45,8 +46,10 @@ def evaluate_policy(rows: Sequence[Row], scores: Sequence[float | None], policy:
         raise ValueError('One score is required per field')
     n = len(rows)
     errors = sum(not r['correct'] for r in rows)
-    decisions = [policy.needs_review(s, r['status'], r.get('field_id')) for r, s in zip(rows, scores, strict=True)]
-    mandatory = [policy.is_mandatory(s, r['status'], r.get('field_id')) for r, s in zip(rows, scores, strict=True)]
+    decisions = [policy.needs_review(s, r['status'], r.get('field_id'), r.get('shape_violation', False))
+                 for r, s in zip(rows, scores, strict=True)]
+    mandatory = [policy.is_mandatory(s, r['status'], r.get('field_id'), r.get('shape_violation', False))
+                 for r, s in zip(rows, scores, strict=True)]
     reviewed = sum(decisions)
     caught = sum(flag and not r['correct'] for r, flag in zip(rows, decisions, strict=True))
     accepted = n - reviewed
@@ -81,22 +84,29 @@ def oracle_review_rate(rows: Sequence[Row], scores: Sequence[float | None], targ
     errors still needed.
     """
     policy = policy or ReviewPolicy(0.)
-    mandatory = [policy.is_mandatory(s, r['status'], r.get('field_id')) for r, s in zip(rows, scores, strict=True)]
+    mandatory = [policy.is_mandatory(s, r['status'], r.get('field_id'), r.get('shape_violation', False))
+                 for r, s in zip(rows, scores, strict=True)]
     errors = sum(not r['correct'] for r in rows)
     forced_errors = sum(m and not r['correct'] for r, m in zip(rows, mandatory, strict=True))
     extra = max(0, math.ceil(target * errors) - forced_errors)
     return (sum(mandatory) + extra) / len(rows) if rows else 0.
 
 
+def _decided(row: Row, score: float | None) -> bool:
+    """Whether a threshold decides the field (see :func:`l2r4kie.confidence.policy._usable`)."""
+    return (row['status'] == 'ok' and not row.get('shape_violation', False) and score is not None
+            and math.isfinite(score))
+
+
 def review_curve(rows: Sequence[Row], scores: Sequence[float | None]) -> dict[str, Any]:
     """Risk-coverage curve over realisable thresholds, and its area (AURC).
 
-    Fields without a usable score are ranked last for the AURC only; no
-    policy may accept them.
+    Fields without a usable score, or with a shape violation, are ranked
+    last for the AURC only; no policy may accept them.
     """
     groups: dict[float, list[Row]] = defaultdict(list)
     for row, score in zip(rows, scores, strict=True):
-        if row['status'] == 'ok' and score is not None and math.isfinite(score):
+        if _decided(row, score):
             groups[float(score)].append(row)
     n = len(rows)
     accepted = errors = 0
@@ -120,8 +130,7 @@ def budgets(rows: Sequence[Row], scores: Sequence[float | None],
     A tie group that would cross the budget is left out entirely; the
     achieved review rate is reported instead of breaking the tie.
     """
-    mandatory = {i for i, (r, s) in enumerate(zip(rows, scores, strict=True))
-                 if r['status'] != 'ok' or s is None or not math.isfinite(s)}
+    mandatory = {i for i, (r, s) in enumerate(zip(rows, scores, strict=True)) if not _decided(r, s)}
     groups: dict[float, list[int]] = defaultdict(list)
     for i, score in enumerate(scores):
         if i not in mandatory:
@@ -199,7 +208,8 @@ def bootstrap_comparison(rows: Sequence[Row], base_scores: Sequence[float | None
     for indices in documents.values():
         values = [len(indices), sum(not rows[i]['correct'] for i in indices)]
         for scores, policy in ((base_scores, base_policy), (new_scores, new_policy)):
-            flags = [policy.needs_review(scores[i], rows[i]['status'], rows[i].get('field_id')) for i in indices]
+            flags = [policy.needs_review(scores[i], rows[i]['status'], rows[i].get('field_id'),
+                                         rows[i].get('shape_violation', False)) for i in indices]
             values.extend([sum(flags), sum(flag and not rows[i]['correct'] for i, flag in zip(indices, flags))])
         aggregate.append(values)
     data = np.array(aggregate, dtype=float)
