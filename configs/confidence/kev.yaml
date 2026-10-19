@@ -12,6 +12,12 @@
 # audit is paired with r4's on the same documents and fields (gate G4). None
 # of these documents is in kev_r4's extractor training set (cache-traces checks).
 #
+# Served bundle: artifacts/kev-r4/confidence/selected-shapes (output=…selected-shapes,
+# shape_rules=true; docs/results/shape_rules.md):
+#   l2r4kie infer --confidence 'artifacts/kev-r4/confidence/selected-shapes/heads/attention[value@14+value@21]' ...
+# Faster decodes (merge_adapter, fast_decode) need their own caches and finalize:
+# docs/results/infer_speed.md, docs/results/fresh_audit.md.
+#
 # Layers 14 and 21: on the smoke probe (docs/results/kev_confidence.md) the
 # value state at these layers separated right from wrong values better than
 # the final (normed) state.
