@@ -144,6 +144,38 @@ def _train(args: argparse.Namespace) -> int:
     return 0
 
 
+def _import_conversations(args: argparse.Namespace) -> int:
+    """Read chat-style KIE dataset directories into one documents JSONL for ``evaluate --documents-jsonl``."""
+    import json
+    import random
+
+    from .data.conversations import iter_dataset
+    from .utils.fingerprint import sha256_file
+    from .utils.io import read_jsonl, write_jsonl
+
+    seen: set[str] = set()
+    for prepared in args.exclude_pages_of or []:
+        for split in ('train', 'dev', 'calibration', 'test'):
+            path = Path(prepared, f'{split}.jsonl')
+            if path.is_file():
+                seen.update(h for row in read_jsonl(path) for h in row['image_sha256'])
+    rows, report = [], {}
+    for directory in args.datasets:
+        documents = list(iter_dataset(directory, args.variant, args.split))
+        overlapping = 0
+        if seen:
+            kept = [d for d in documents if not seen.intersection(sha256_file(p) for p in d.pages)]
+            overlapping, documents = len(documents) - len(kept), kept
+        if args.per_dataset is not None and len(documents) > args.per_dataset:
+            documents = random.Random(f'{args.seed}:{Path(directory).name}').sample(documents, args.per_dataset)
+        rows.extend(d.to_json() for d in documents)
+        report[Path(directory).name] = {'documents': len(documents), 'fields': sum(len(d.fields) for d in documents),
+                                        'dropped_overlapping_pages': overlapping}
+    write_jsonl(args.output, rows)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _evaluate(args: argparse.Namespace) -> int:
     """Decode labelled documents with an adapter and write predictions and metrics."""
     import json
@@ -156,12 +188,20 @@ def _evaluate(args: argparse.Namespace) -> int:
     from .utils.config import load_config
 
     config = TrainConfig.from_dict(load_config(args.config, args.set))
-    s = config.selection
-    selection = Selection(Path(s.prepared), s.seed, s.holdout_percent, s.forms, s.balanced_forms)
-    documents = evaluation_documents(selection, args.split, args.documents_file, args.limit)
+    if args.documents_jsonl:
+        from .data.types import Document
+        from .utils.io import read_jsonl
+
+        documents = [Document.from_json(r) for r in read_jsonl(args.documents_jsonl)][:args.limit]
+    else:
+        s = config.selection
+        selection = Selection(Path(s.prepared), s.seed, s.holdout_percent, s.forms, s.balanced_forms)
+        documents = evaluation_documents(selection, args.split, args.documents_file, args.limit)
     provenance = {'model': config.model, 'adapter': str(args.adapter) if args.adapter else None,
-                  'adapter_fingerprint': adapter_fingerprint(args.adapter), 'split': args.split,
-                  'documents_file': str(args.documents_file) if args.documents_file else None}
+                  'adapter_fingerprint': adapter_fingerprint(args.adapter),
+                  'split': None if args.documents_jsonl else args.split,
+                  'documents_file': str(args.documents_file) if args.documents_file else None,
+                  'documents_jsonl': str(args.documents_jsonl) if args.documents_jsonl else None}
     # Refuse a mismatching output directory before spending time (and GPU memory) on the model.
     claim_output(args.output, run_record(config.extractor(), documents, args.fields, args.max_value_tokens,
                                          provenance))
@@ -423,6 +463,8 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument('--split', default='dev', choices=['train_reserve', 'dev', 'calibration', 'test'])
     evaluate.add_argument('--documents-file', help='JSON {"documents": [ids]} fixing the documents and their '
                                                    'order, e.g. the r4 dev cohort_plan.json')
+    evaluate.add_argument('--documents-jsonl', help='evaluate these documents (e.g. from import-conversations) '
+                                                    'instead of a split of the config\'s selection')
     evaluate.add_argument('--limit', type=int, help='first N documents (r4 test: 116)')
     evaluate.add_argument('--fields', type=int, help='first N fields per document (r4: 24; default: all)')
     evaluate.add_argument('--max-value-tokens', type=int, help='decode budget (default: format.max_value_tokens)')
@@ -431,6 +473,21 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument('--set', action='append', default=[], metavar='KEY=VALUE',
                           help='override a config value, e.g. device=cuda:1 (repeatable)')
     evaluate.set_defaults(handler=_evaluate)
+
+    imported = commands.add_parser(
+        'import-conversations', help='read chat-style KIE datasets (user prompt + JSON answer) as documents',
+        description='One document per label: answer leaves become fields (arrays atomic), descriptions come from '
+                    'the prompt\'s field list. Writes a documents JSONL for evaluate --documents-jsonl.',
+    )
+    imported.add_argument('datasets', nargs='+', help='dataset directories (image_label_details.json + labels/)')
+    imported.add_argument('--output', required=True, help='documents JSONL to write')
+    imported.add_argument('--variant', default='v1', help='prompt variant to keep (labels named <doc>__vN)')
+    imported.add_argument('--split', help='keep entries of this split only (when the dataset has splits)')
+    imported.add_argument('--per-dataset', type=int, help='sample at most N documents per dataset')
+    imported.add_argument('--seed', type=int, default=42, help='sampling seed')
+    imported.add_argument('--exclude-pages-of', action='append', metavar='PREPARED',
+                          help='drop documents sharing a page (by SHA-256) with these prepared splits (repeatable)')
+    imported.set_defaults(handler=_import_conversations)
 
     rescore = commands.add_parser('evaluate-file', help='re-score a predictions.jsonl (also old r4 files)')
     rescore.add_argument('--predictions', required=True)
