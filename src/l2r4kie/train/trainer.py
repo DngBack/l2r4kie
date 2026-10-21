@@ -167,6 +167,7 @@ class Trainer:
         document, branches = self.fields_for(step)
         self.model.train()
         prefix = extractor.encode_prefix(document.pages)
+        branches = within_budget(branches, int(prefix['input_ids'].shape[1]), config.max_sequence_tokens)
         with torch.no_grad():
             positions = prefix_positions(extractor.core, prefix)
         packed = pack(prefix, positions, branches, config.format.max_value_tokens, self.dtype)
@@ -303,6 +304,23 @@ class Trainer:
         }
         write_json(self.output / 'training_summary.json', summary)
         return summary
+
+
+def within_budget(branches: list[EncodedBranch], prefix_tokens: int, budget: int | None) -> list[EncodedBranch]:
+    """The branches, in order, that keep the packed sequence within ``budget`` tokens.
+
+    A branch that would overflow is skipped and later, shorter ones may still
+    fit. When none fits, the shortest is kept alone (a step trains on at least
+    one field). ``budget=None`` keeps them all.
+    """
+    if budget is None:
+        return branches
+    kept, total = [], prefix_tokens
+    for branch in branches:
+        if total + branch.length <= budget:
+            kept.append(branch)
+            total += branch.length
+    return kept or [min(branches, key=lambda b: b.length)]
 
 
 def _open_log(path: Path, keep_through: int) -> TextIO:

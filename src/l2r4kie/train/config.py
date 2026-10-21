@@ -116,6 +116,10 @@ class TrainConfig:
         init_adapter: Start from this adapter instead of a fresh LoRA.
         steps: Training steps; one step is one document.
         fields_per_document: Fields sampled per step (all if fewer fit).
+        max_sequence_tokens: Packed sequence budget of one step (prefix plus
+            branches): sampled branches that would overflow it are left out,
+            keeping at least the shortest. ``None``: no budget. Training
+            memory grows faster than linearly with the sequence (dense masks).
         gradient_accumulation: Steps per optimizer update.
         lr: Peak learning rate (AdamW).
         weight_decay: AdamW weight decay (torch default 0.01, as r4).
@@ -146,6 +150,7 @@ class TrainConfig:
     init_adapter: str | None = None
     steps: int = 100
     fields_per_document: int = 4
+    max_sequence_tokens: int | None = None
     gradient_accumulation: int = 1
     lr: float = 1e-4
     weight_decay: float = 0.01
@@ -165,6 +170,9 @@ class TrainConfig:
         for name in positive:
             if not isinstance(getattr(self, name), int) or getattr(self, name) < 1:
                 raise ValueError(f'{name} must be a positive integer, got {getattr(self, name)!r}')
+        if self.max_sequence_tokens is not None and (
+                not isinstance(self.max_sequence_tokens, int) or self.max_sequence_tokens < 1):
+            raise ValueError(f'max_sequence_tokens must be a positive integer, got {self.max_sequence_tokens!r}')
         for name in ('save_every', 'warmup_updates'):
             if not isinstance(getattr(self, name), int) or getattr(self, name) < 0:
                 raise ValueError(f'{name} must be a non-negative integer, got {getattr(self, name)!r}')
