@@ -14,6 +14,7 @@ from torch.nn import functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils.checkpoint import checkpoint
 
+from ..model.hybrid import HybridCore
 from ..model.packing import Packed
 from .config import LossWeighting
 
@@ -75,7 +76,8 @@ def value_loss(core: torch.nn.Module, lm_head: torch.nn.Module, packed: Packed,
     positions, whose full FP32 logits (151,936 wide) would take ~6 GB.
 
     Args:
-        core: Inner ``Qwen2VLModel`` (possibly with LoRA layers).
+        core: Inner ``Qwen2VLModel`` or :class:`~l2r4kie.model.hybrid.HybridCore`
+            (possibly with LoRA layers).
         lm_head: Output projection (bias-free, as in Qwen2-VL).
         packed: Output of :func:`~l2r4kie.model.packing.pack`.
         weighting: See :data:`~l2r4kie.train.config.LossWeighting`.
@@ -84,7 +86,10 @@ def value_loss(core: torch.nn.Module, lm_head: torch.nn.Module, packed: Packed,
     # Dense block masks can make the cuDNN/flash SDPA backward non-finite on this
     # torch/CUDA stack; the math backend accumulates in FP32 and is required here.
     with sdpa_kernel(SDPBackend.MATH):
-        hidden = core(**packed.inputs).last_hidden_state[0]
+        if isinstance(core, HybridCore):
+            hidden = core.packed_hidden(packed.inputs, packed.segments)
+        else:
+            hidden = core(**packed.inputs).last_hidden_state[0]
     states = hidden[packed.predict_positions]
     weights = position_weights(packed, weighting)
     total = states.new_zeros((), dtype=torch.float32)

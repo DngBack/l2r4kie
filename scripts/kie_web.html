@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KIE thử nghiệm</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1d2330; --muted:#6b7280; --line:#e3e6eb; --accent:#2457d6;
+          --ok:#1a7f37; --bad:#c62828; --warn:#b26a00; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--bg); color:var(--ink); }
+  header { display:flex; align-items:center; gap:16px; padding:10px 20px; background:var(--card); border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; }
+  nav button { border:0; background:none; padding:6px 10px; cursor:pointer; color:var(--muted); font-size:14px; border-radius:6px; }
+  nav button.on { background:#e8eefc; color:var(--accent); font-weight:600; }
+  #status { margin-left:auto; color:var(--muted); font-size:13px; }
+  main { padding:16px 20px; }
+  .grid { display:grid; grid-template-columns: minmax(320px, 420px) 1fr; gap:16px; align-items:start; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:16px; }
+  .card h2 { font-size:14px; margin:0 0 10px; }
+  label { display:block; font-weight:600; margin:10px 0 4px; font-size:13px; }
+  select, textarea, input[type=file] { width:100%; font:inherit; }
+  select { padding:6px; border:1px solid var(--line); border-radius:6px; background:#fff; }
+  textarea { min-height:220px; padding:8px; border:1px solid var(--line); border-radius:6px; font:12.5px/1.4 ui-monospace, Menlo, Consolas, monospace; resize:vertical; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .tabs2 button { border:1px solid var(--line); background:#fff; padding:5px 10px; border-radius:6px; cursor:pointer; }
+  .tabs2 button.on { border-color:var(--accent); color:var(--accent); font-weight:600; }
+  .small { font-size:12px; color:var(--muted); }
+  .btn { background:var(--accent); color:#fff; border:0; padding:9px 16px; border-radius:7px; font-weight:600; cursor:pointer; font-size:14px; }
+  .btn:disabled { opacity:.5; cursor:wait; }
+  .link { background:none; border:0; color:var(--accent); cursor:pointer; padding:0; font-size:12px; text-decoration:underline; }
+  .pages { display:flex; gap:8px; overflow-x:auto; }
+  .pages img { max-height:360px; border:1px solid var(--line); border-radius:6px; background:#fff; }
+  .stats { display:grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap:8px; }
+  .stat { border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+  .stat b { display:block; font-size:18px; font-variant-numeric: tabular-nums; }
+  .stat span { font-size:12px; color:var(--muted); }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:600; font-size:12px; position:sticky; top:0; background:var(--card); }
+  td.num, th.num { text-align:right; font-variant-numeric: tabular-nums; white-space:nowrap; }
+  td code, pre { font:12px/1.4 ui-monospace, Menlo, Consolas, monospace; }
+  pre { background:#f3f4f6; padding:10px; border-radius:6px; overflow:auto; max-height:480px; margin:0; white-space:pre-wrap; word-break:break-word; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); } .warn { color:var(--warn); }
+  .two { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  @media (max-width: 1100px) { .two { grid-template-columns:1fr; } }
+  .err { background:#fdecea; color:var(--bad); padding:8px 10px; border-radius:6px; margin-top:10px; white-space:pre-wrap; }
+  .scroll { max-height:520px; overflow:auto; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>KIE thử nghiệm · Qwen3.5 fine-tuned</h1>
+  <nav><button id="tab-run" class="on">Chạy thử</button><button id="tab-log">Log tốc độ</button></nav>
+  <div id="status">…</div>
+</header>
+
+<main>
+<section id="view-run" class="grid">
+  <div>
+    <div class="card">
+      <h2>1. Model</h2>
+      <select id="model"></select>
+      <div class="row" style="margin-top:8px">
+        <label style="margin:0;font-weight:400"><input type="checkbox" id="merge"> Merge LoRA (decode nhanh hơn ~2×, số hơi khác)</label>
+      </div>
+      <div id="model-info" class="small" style="margin-top:6px"></div>
+    </div>
+
+    <div class="card">
+      <h2>2. Tài liệu</h2>
+      <div class="row tabs2"><button id="src-upload" class="on">Upload ảnh</button><button id="src-test">Tài liệu tập test (có đáp án)</button></div>
+      <div id="box-upload">
+        <label>Ảnh trang (chọn nhiều ảnh theo thứ tự trang)</label>
+        <input type="file" id="files" accept="image/*" multiple>
+      </div>
+      <div id="box-test" class="hidden">
+        <label>Dataset</label><select id="dataset"></select>
+        <label>Tài liệu</label><select id="doc"></select>
+        <div class="row" style="margin-top:6px"><button class="link" id="random-doc">Chọn ngẫu nhiên</button></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>3. Trường cần trích xuất</h2>
+      <div class="small">Dạng prompt Data/kie (<code>- "Tên": mô tả</code>), cây mô tả JSON, hoặc danh sách JSON <code>[{"id","description","kind"}]</code>.</div>
+      <div class="row" style="margin:6px 0"><button class="link" id="tpl-prompt">Mẫu prompt</button> · <button class="link" id="tpl-tree">Mẫu cây JSON</button> · <button class="link" id="tpl-list">Mẫu danh sách</button></div>
+      <textarea id="fields" spellcheck="false"></textarea>
+      <div class="row" style="margin-top:10px"><button class="btn" id="run">Chạy</button><span id="run-note" class="small"></span></div>
+      <div id="error" class="err hidden"></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="card"><h2>Trang</h2><div id="pages" class="pages"><span class="small">Chưa có ảnh.</span></div></div>
+    <div id="result" class="hidden">
+      <div class="card"><h2>Thời gian & tốc độ</h2><div id="stats" class="stats"></div><div id="stats-note" class="small" style="margin-top:8px"></div></div>
+      <div class="card"><h2>JSON ghép lại</h2>
+        <div class="two"><div><div class="small">Model</div><pre id="json"></pre></div><div id="truth-box"><div class="small">Đáp án</div><pre id="truth"></pre></div></div>
+      </div>
+      <div class="card"><h2>Từng trường</h2><div class="scroll"><table id="fields-table"></table></div></div>
+    </div>
+  </div>
+</section>
+
+<section id="view-log" class="hidden">
+  <div class="card"><h2>Tổng hợp theo model</h2><table id="summary"></table>
+    <div class="small" style="margin-top:6px">infer = đọc ảnh + encode + decode (không tính chờ hàng đợi và load model). token/s = token sinh ra / thời gian decode. GPU dùng chung với tiến trình khác thì số chậm hơn.</div></div>
+  <div class="card"><h2>Các request gần nhất</h2><div class="scroll"><table id="records"></table></div>
+    <div class="small" style="margin-top:6px">File log: <code>artifacts/kie-web/requests.jsonl</code> · response đầy đủ: <code>artifacts/kie-web/responses/&lt;id&gt;.json</code></div></div>
+</section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const api = (p, opt) => fetch('api/' + p, opt).then(async r => { const j = await r.json(); if (!r.ok) throw new Error(j.error || r.statusText); return j; });
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const show = (v) => v === null || v === undefined ? '<span class="bad">null</span>' : v === '' ? '<span class="small">(trống)</span>' : esc(typeof v === 'string' ? v : JSON.stringify(v));
+const fmt = (x, d = 2) => x === null || x === undefined ? '—' : Number(x).toFixed(d);
+let source = 'upload', uploads = [], testDocs = [];
+
+const TEMPLATES = {
+  prompt: `- "Số hóa đơn": Số hóa đơn in trên chứng từ
+- "Ngày lập": Ngày lập hóa đơn, dạng dd/mm/yyyy
+- "Người bán" (object)
+  - "Tên": Tên đơn vị bán hàng
+  - "Mã số thuế"
+- "Hàng hóa" (mảng object): Mỗi dòng một mặt hàng
+  - "Tên hàng"
+  - "Thành tiền"
+- "Tổng tiền": Tổng tiền thanh toán
+- "Đã ký" (true/false): Có chữ ký người bán`,
+  tree: JSON.stringify({"Số hóa đơn": "Số hóa đơn in trên chứng từ", "Người bán": {"Tên": "Tên đơn vị bán hàng", "Mã số thuế": null},
+                        "Hàng hóa": [{"__desc": "Mỗi dòng một mặt hàng"}], "Tổng tiền": "Tổng tiền thanh toán", "Đã ký": "(true/false) Có chữ ký người bán"}, null, 2),
+  list: JSON.stringify([{"id": "/Số hóa đơn", "description": "Số hóa đơn in trên chứng từ"},
+                        {"id": "/Hàng hóa", "description": "Mỗi dòng một mặt hàng", "kind": "array"},
+                        {"id": "/Tổng tiền", "description": "Tổng tiền thanh toán"}], null, 2),
+};
+$('tpl-prompt').onclick = () => $('fields').value = TEMPLATES.prompt;
+$('tpl-tree').onclick = () => $('fields').value = TEMPLATES.tree;
+$('tpl-list').onclick = () => $('fields').value = TEMPLATES.list;
+$('fields').value = TEMPLATES.prompt;
+
+// ---- tabs
+function tab(name) {
+  $('tab-run').classList.toggle('on', name === 'run'); $('tab-log').classList.toggle('on', name === 'log');
+  $('view-run').classList.toggle('hidden', name !== 'run'); $('view-log').classList.toggle('hidden', name !== 'log');
+  if (name === 'log') loadLogs();
+}
+$('tab-run').onclick = () => tab('run'); $('tab-log').onclick = () => tab('log');
+
+function setSource(s) {
+  source = s;
+  $('src-upload').classList.toggle('on', s === 'upload'); $('src-test').classList.toggle('on', s === 'test');
+  $('box-upload').classList.toggle('hidden', s !== 'upload'); $('box-test').classList.toggle('hidden', s !== 'test');
+  if (s === 'upload') renderUploads(); else if ($('doc').value) pickDoc($('doc').value);
+}
+$('src-upload').onclick = () => setSource('upload'); $('src-test').onclick = () => setSource('test');
+
+// ---- status / models
+let lastOptions = '';
+async function refreshStatus() {
+  try {
+    const s = await api('status');
+    $('status').textContent = s.busy ? '⏳ GPU: ' + s.busy : '● sẵn sàng · ' + s.device;
+    const sel = $('model'), cur = sel.value;
+    const options = Object.entries(s.models).map(([k, m]) =>
+      `<option value="${k}" ${m.available ? '' : 'disabled'}>${k.toUpperCase()} — ${esc(m.model)} · ${esc(m.label)}</option>`).join('');
+    if (options !== lastOptions) {  // rebuilding an open dropdown would close it
+      sel.innerHTML = lastOptions = options;
+      sel.value = cur || (s.models['4b'] && s.models['4b'].available ? '4b' : '9b');
+    }
+    const m = s.models[sel.value];
+    $('model-info').innerHTML = m ? `Adapter: <code>${esc(m.adapter || '')}</code><br>` +
+      (m.loaded.length ? 'Đã nạp: ' + m.loaded.map(l => (l.merge ? 'merged' : 'LoRA') + (l.stale ? ' (cũ, sẽ nạp lại)' : '')).join(', ')
+                       : 'Chưa nạp — lần chạy đầu sẽ mất thêm thời gian load.') : '';
+  } catch (e) { $('status').textContent = '✕ mất kết nối server'; }
+}
+$('model').onchange = refreshStatus;
+setInterval(refreshStatus, 3000); refreshStatus();
+
+// ---- uploads
+$('files').onchange = async () => {
+  uploads = await Promise.all([...$('files').files].map(f => new Promise((ok, no) => {
+    const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = no; r.readAsDataURL(f); })));
+  renderUploads();
+};
+function renderUploads() {
+  $('pages').innerHTML = uploads.length ? uploads.map(u => `<img src="${u}">`).join('') : '<span class="small">Chưa có ảnh.</span>';
+}
+
+// ---- test documents
+async function loadDatasets() {
+  const ds = await api('datasets');
+  $('dataset').innerHTML = ds.map(([d, n]) => `<option value="${esc(d)}">${esc(d)} (${n})</option>`).join('');
+  await loadDocs();
+}
+async function loadDocs() {
+  testDocs = await api('samples?dataset=' + encodeURIComponent($('dataset').value));
+  $('doc').innerHTML = testDocs.map(d => `<option value="${esc(d.id)}">${esc(d.id.split('__').slice(1).join('__'))} · ${d.pages} trang · ${d.fields} trường</option>`).join('');
+  if (source === 'test' && testDocs.length) pickDoc(testDocs[0].id);
+}
+async function pickDoc(id) {
+  const d = await api('doc?id=' + encodeURIComponent(id));
+  $('pages').innerHTML = Array.from({length: d.pages}, (_, i) => `<img src="api/page?doc=${encodeURIComponent(id)}&i=${i}">`).join('');
+  $('fields').value = JSON.stringify(d.fields, null, 2);
+}
+$('dataset').onchange = loadDocs;
+$('doc').onchange = () => pickDoc($('doc').value);
+$('random-doc').onclick = () => { if (!testDocs.length) return; const d = testDocs[Math.floor(Math.random() * testDocs.length)]; $('doc').value = d.id; pickDoc(d.id); };
+loadDatasets().catch(() => {});
+
+// ---- run
+$('run').onclick = async () => {
+  $('error').classList.add('hidden');
+  const body = {model: $('model').value, merge: $('merge').checked, fields: $('fields').value};
+  if (source === 'test') body.doc_id = $('doc').value; else body.pages = uploads;
+  if (source === 'upload' && !uploads.length) return showError('Chọn ít nhất một ảnh trang.');
+  $('run').disabled = true; const t0 = performance.now();
+  const tick = setInterval(() => $('run-note').textContent = `đang chạy… ${((performance.now() - t0) / 1000).toFixed(1)} s`, 200);
+  try {
+    const r = await api('run', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    renderResult(r, (performance.now() - t0) / 1000);
+    $('run-note').textContent = `xong · request ${r.record.id}`;
+  } catch (e) { showError(e.message); $('run-note').textContent = ''; }
+  finally { clearInterval(tick); $('run').disabled = false; refreshStatus(); }
+};
+function showError(m) { $('error').textContent = m; $('error').classList.remove('hidden'); }
+
+function renderResult(r, roundTrip) {
+  const x = r.record, t = x.timings;
+  const stat = (v, label, cls = '') => `<div class="stat"><b class="${cls}">${v}</b><span>${label}</span></div>`;
+  $('stats').innerHTML = [
+    stat(fmt(t.infer) + ' s', 'infer (ảnh → kết quả)'),
+    stat(fmt(t.prefix) + ' s', 'đọc ảnh + processor'),
+    stat(fmt(t.decode) + ' s', 'model: vision + decode'),
+    t.load ? stat(fmt(t.load, 1) + ' s', 'load model (lần đầu)', 'warn') : '',
+    t.queue > 0.05 ? stat(fmt(t.queue, 1) + ' s', 'chờ hàng đợi GPU', 'warn') : '',
+    stat(fmt(roundTrip) + ' s', 'tổng phía trình duyệt'),
+    stat(x.generated_tokens, 'token sinh ra'),
+    stat(x.longest_field_tokens, 'token trường dài nhất'),
+    stat(fmt(x.tokens_per_s, 1), 'token/s'),
+    stat(fmt(x.fields_per_s), 'trường/s'),
+    stat(x.prefix_tokens, 'token prefix (ảnh + text)'),
+    stat(x.peak_gib === null ? '—' : fmt(x.peak_gib, 1) + ' GiB', 'GPU peak'),
+    x.exact_match !== null ? stat((x.exact_match * 100).toFixed(1) + '%', `EM (${x.scored_fields} trường)`, x.exact_match >= 0.9 ? 'ok' : x.exact_match >= 0.7 ? 'warn' : 'bad') : '',
+  ].join('');
+  $('stats-note').textContent = `${x.model.toUpperCase()}${x.merge ? ' merged' : ''} · adapter ${x.adapter} · ${x.pages} trang · ${x.fields} trường (${x.arrays} mảng) · trạng thái ${JSON.stringify(x.status)}. ` +
+    'Các trường decode song song; thời gian chủ yếu do trường dài nhất.';
+  $('json').textContent = JSON.stringify(r.json, null, 2);
+  $('truth-box').classList.toggle('hidden', !r.truth);
+  if (r.truth) $('truth').textContent = JSON.stringify(r.truth, null, 2);
+  const hasGT = r.fields.some(f => 'target' in f);
+  $('fields-table').innerHTML = `<tr><th>Trường</th><th>Kết quả</th>${hasGT ? '<th>Đáp án</th><th></th>' : ''}<th>Trạng thái</th><th class="num">Token</th></tr>` +
+    r.fields.map(f => `<tr><td><code>${esc(f.id)}</code>${f.description !== f.id ? `<div class="small">${esc(f.description)}</div>` : ''}${f.kind === 'array' ? ' <span class="small">[mảng]</span>' : ''}</td>
+      <td>${show(f.value)}${f.value === null && f.text ? `<div class="small">text: ${esc(f.text.slice(0, 300))}</div>` : ''}</td>
+      ${hasGT ? `<td>${'target' in f ? show(f.target) : ''}</td><td>${'correct' in f ? (f.correct ? '<span class="ok">✓</span>' : '<span class="bad">✗</span>') : ''}</td>` : ''}
+      <td class="${f.status === 'ok' ? '' : 'bad'}">${esc(f.status)}${f.stop && f.stop !== 'close' ? ` (${esc(f.stop)})` : ''}</td><td class="num">${f.tokens}</td></tr>`).join('');
+  $('result').classList.remove('hidden');
+}
+
+// ---- logs
+async function loadLogs() {
+  const l = await api('logs');
+  $('summary').innerHTML = '<tr><th>Model</th><th class="num">Request</th><th class="num">infer trung vị (s)</th><th class="num">trung bình</th><th class="num">max</th><th class="num">đọc ảnh trung vị</th><th class="num">trường/s</th><th class="num">token/s</th></tr>' +
+    (l.summary.length ? l.summary.map(s => `<tr><td>${esc(s.model)}</td><td class="num">${s.requests}</td><td class="num">${fmt(s.median_infer_s)}</td><td class="num">${fmt(s.mean_infer_s)}</td><td class="num">${fmt(s.max_infer_s)}</td><td class="num">${fmt(s.median_prefix_s, 3)}</td><td class="num">${fmt(s.fields_per_s)}</td><td class="num">${fmt(s.tokens_per_s, 1)}</td></tr>`).join('')
+      : '<tr><td colspan="8" class="small">Chưa có request.</td></tr>');
+  $('records').innerHTML = '<tr><th>Thời gian (UTC)</th><th>Model</th><th>Nguồn</th><th class="num">Trang</th><th class="num">Trường</th><th class="num">infer s</th><th class="num">decode s</th><th class="num">load s</th><th class="num">token</th><th class="num">token/s</th><th class="num">EM</th><th>Trạng thái / lỗi</th></tr>' +
+    l.records.map(r => r.error ? `<tr><td>${esc(r.time)}</td><td>${esc(r.model || '')}</td><td>${esc(r.source || '')}</td><td colspan="8"></td><td class="bad">${esc(r.error)}</td></tr>` :
+      `<tr><td>${esc(r.time.replace('T', ' ').replace('+00:00', ''))}</td><td>${r.model.toUpperCase()}${r.merge ? ' merged' : ''}</td><td><code>${esc(r.source.replace('test:', ''))}</code></td><td class="num">${r.pages}</td><td class="num">${r.fields}</td>
+       <td class="num">${fmt(r.timings.infer)}</td><td class="num">${fmt(r.timings.decode)}</td><td class="num">${r.timings.load ? fmt(r.timings.load, 1) : ''}</td><td class="num">${r.generated_tokens}</td><td class="num">${fmt(r.tokens_per_s, 1)}</td>
+       <td class="num">${r.exact_match === null ? '' : (r.exact_match * 100).toFixed(0) + '%'}</td><td class="small">${esc(JSON.stringify(r.status))}</td></tr>`).join('');
+}
+</script>
+</body>
+</html>

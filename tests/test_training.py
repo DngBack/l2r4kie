@@ -22,7 +22,7 @@ from l2r4kie.model.packing import pack, prefix_positions
 from l2r4kie.train.config import TrainConfig
 from l2r4kie.train.losses import position_weights, value_loss
 from l2r4kie.train.schedule import lr_multiplier
-from l2r4kie.train.trainer import Trainer, train
+from l2r4kie.train.trainer import Trainer, train, within_budget
 from l2r4kie.utils.io import read_json, read_jsonl, write_jsonl
 
 # ------------------------------------------------------------------ fixtures
@@ -92,6 +92,16 @@ def test_config_round_trips_and_resume_ignores_operational_keys(prepared: Path, 
     moved = make_config(prepared, tmp_path / 'elsewhere', device='cuda:3', log_every=1)
     assert moved.comparable() == make_config(prepared, tmp_path).comparable()
     assert make_config(prepared, tmp_path, lr=1e-3).comparable() != config.comparable()
+
+
+def test_sequence_budget_skips_overflowing_branches() -> None:
+    branches = [EncodedBranch(name, (1,), (2,) * n) for name, n in [('a', 3), ('b', 9), ('c', 2), ('d', 1)]]
+    names = lambda kept: [b.field_id for b in kept]  # noqa: E731
+    assert names(within_budget(branches, 10, None)) == ['a', 'b', 'c', 'd']
+    assert names(within_budget(branches, 10, 19)) == ['a', 'c', 'd']  # b (10 tokens) would overflow
+    assert names(within_budget(branches, 20, 19)) == ['d']  # the prefix alone overflows: shortest kept
+    with pytest.raises(ValueError, match='max_sequence_tokens'):
+        TrainConfig.from_dict({'output': 'x', 'selection': {'prepared': 'p'}, 'max_sequence_tokens': 0})
 
 
 def test_lr_schedule() -> None:

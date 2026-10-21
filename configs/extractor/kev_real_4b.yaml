@@ -1,0 +1,44 @@
+# KevFormat extractor on Qwen3.5-4B trained on the real chat-style KIE datasets
+# (IDP-Training-Pipeline/Data/kie, split by scripts/prepare_kie_real.py into
+# artifacts/kie-real), from the base model, not from the synthetic-data adapter.
+# Same recipe as kev_q35_4b.yaml except:
+# * selection: artifacts/kie-real, no train reserve (holdout 0); balanced_forms
+#   cycles the 36 datasets so vlm-hard (11k documents) does not dominate.
+# * 3000 steps (18.8k training documents, about 18 fields each).
+# * monitor every 500 steps on 24 dev documents.
+# * max_value_tokens 4096 (the evaluation decode budget) and a 12288-token
+#   sequence budget per step: bank statements and financial reports reached
+#   20-23k tokens (9-13k-token transaction arrays) and ran out of memory
+#   (100 GiB on 9B; the first attempts are in artifacts/kev-real-*-oom1).
+model: Qwen/Qwen3.5-4B
+output: artifacts/kev-real-4b
+device: cuda:0
+precision: bfloat16
+seed: 42
+selection:
+  prepared: artifacts/kie-real
+  seed: 42
+  holdout_percent: 0
+  balanced_forms: true
+format:
+  close: box_end
+  max_value_tokens: 4096
+  max_pixels: 2097152
+lora:
+  r: 16
+  alpha: 32
+  target_modules: [q_proj, k_proj, v_proj, o_proj, in_proj_qkv, in_proj_z, out_proj]
+steps: 3000
+fields_per_document: 12
+max_sequence_tokens: 12288
+lr: 0.0001
+loss_weighting: token
+gradient_checkpointing: true
+log_every: 50
+save_every: 100
+monitor:
+  every: 500
+  splits: [dev]
+  documents: 24
+  fields: 12
+  max_value_tokens: 512

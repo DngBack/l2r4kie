@@ -16,6 +16,7 @@ every branch is decoded on its own copy of the prefix KV cache:
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -26,7 +27,7 @@ from .format import EncodedBranch
 
 
 class RopeModel(Protocol):
-    """Anything with Qwen2-VL's ``get_rope_index`` (the inner ``Qwen2VLModel``)."""
+    """Anything with Qwen2-VL's ``get_rope_index`` (``Qwen2VLModel`` or :class:`~.hybrid.HybridCore`)."""
 
     def get_rope_index(self, input_ids: torch.Tensor, image_grid_thw: torch.Tensor | None = ...,
                        video_grid_thw: torch.Tensor | None = ...,
@@ -35,8 +36,16 @@ class RopeModel(Protocol):
 
 def prefix_positions(model: RopeModel, prefix: Mapping[str, torch.Tensor]) -> torch.Tensor:
     """M-RoPE positions ``(3, 1, prefix_len)`` of the prefix, image grid included."""
-    positions, _ = model.get_rope_index(prefix['input_ids'], prefix.get('image_grid_thw'),
-                                        attention_mask=prefix['attention_mask'])
+    ids = prefix['input_ids']
+    if 'mm_token_type_ids' in inspect.signature(model.get_rope_index).parameters:
+        # transformers >= 5: Qwen2-VL takes the token types (image tokens are type 1).
+        types = prefix.get('mm_token_type_ids')
+        if types is None:
+            types = (ids == model.config.image_token_id).int()
+        positions, _ = model.get_rope_index(ids, types, prefix.get('image_grid_thw'),
+                                            attention_mask=prefix['attention_mask'])
+        return positions
+    positions, _ = model.get_rope_index(ids, prefix.get('image_grid_thw'), attention_mask=prefix['attention_mask'])
     return positions
 
 
@@ -83,6 +92,8 @@ class Packed:
         decide_positions: ``h_decide`` position of each branch.
         value_positions: ``h_value`` position of each branch.
         field_ids: Field of each branch, aligned with the position tensors.
+        segments: Prefix length, then branch lengths in packing order (the
+            hybrid forward of :mod:`.hybrid` runs segments, not the mask).
     """
 
     inputs: dict[str, Any]
@@ -92,6 +103,7 @@ class Packed:
     decide_positions: torch.Tensor
     value_positions: torch.Tensor
     field_ids: list[str]
+    segments: tuple[int, ...] = ()
 
 
 def pack(prefix: Mapping[str, torch.Tensor], positions: torch.Tensor, branches: Sequence[EncodedBranch],
@@ -147,4 +159,4 @@ def pack(prefix: Mapping[str, torch.Tensor], positions: torch.Tensor, branches: 
         return torch.tensor(values, dtype=torch.long, device=device)
 
     return Packed(inputs, as_long(predict), as_long(targets), as_long(keys), as_long(decides), as_long(values),
-                  [b.field_id for b in branches])
+                  [b.field_id for b in branches], (shared, *lengths))
