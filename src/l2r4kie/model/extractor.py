@@ -1,4 +1,4 @@
-"""Load Qwen2-VL (optionally with a LoRA adapter) and encode documents.
+"""Load Qwen2-VL or Qwen3.5 (optionally with a LoRA adapter) and encode documents.
 
 The :class:`Extractor` owns the model, processor and input format, and
 nothing else: no confidence head or calibration (those live in
@@ -16,6 +16,7 @@ from typing import Any, Literal
 import torch
 
 from .format import DEFAULT_MAX_PIXELS, DEFAULT_MAX_VALUE_TOKENS, KevFormat, load_processor
+from .hybrid import HybridCore, is_hybrid
 from .markers import CloseToken
 
 DEFAULT_MODEL = 'Qwen/Qwen2-VL-2B-Instruct'
@@ -81,11 +82,23 @@ class ExtractorConfig:
         return torch.bfloat16 if self.precision == 'bfloat16' and self.device.startswith('cuda') else torch.float32
 
 
+def load_base(model: str, dtype: torch.dtype) -> torch.nn.Module:
+    """Load the base vision-language model of ``model`` (Qwen2-VL or Qwen3.5) with SDPA attention."""
+    from transformers import AutoConfig
+
+    if is_hybrid(AutoConfig.from_pretrained(model)):
+        from transformers import Qwen3_5ForConditionalGeneration as Model
+    else:
+        from transformers import Qwen2VLForConditionalGeneration as Model
+    return Model.from_pretrained(model, dtype=dtype, attn_implementation='sdpa')
+
+
 class Extractor:
-    """A Qwen2-VL model with its processor and input format.
+    """A Qwen2-VL or Qwen3.5 model with its processor and input format.
 
     Args:
-        model: ``Qwen2VLForConditionalGeneration``, or a ``PeftModel`` wrapping one.
+        model: ``Qwen2VLForConditionalGeneration`` or ``Qwen3_5ForConditionalGeneration``,
+            or a ``PeftModel`` wrapping one.
         processor: Its processor; may be ``None`` if :meth:`encode_prefix`
             is never called (e.g. tests that build prefixes by hand).
         fmt: Input format bound to the model's tokenizer.
@@ -108,11 +121,8 @@ class Extractor:
                 ``adapter/`` (the old repository's layout). ``None`` runs the
                 base model zero-shot.
         """
-        from transformers import Qwen2VLForConditionalGeneration
-
         processor = load_processor(config.model, config.max_pixels)
-        model = Qwen2VLForConditionalGeneration.from_pretrained(
-            config.model, dtype=config.dtype, attn_implementation='sdpa')
+        model = load_base(config.model, config.dtype)
         if adapter is not None:
             from peft import PeftModel
 
@@ -125,14 +135,23 @@ class Extractor:
 
     @property
     def base(self) -> torch.nn.Module:
-        """The ``Qwen2VLForConditionalGeneration`` under any PEFT wrapper."""
+        """The ``...ForConditionalGeneration`` under any PEFT wrapper."""
         get_base = getattr(self.model, 'get_base_model', None)
         return get_base() if get_base is not None else self.model
 
     @property
-    def core(self) -> torch.nn.Module:
-        """Inner ``Qwen2VLModel`` (vision tower + language model, no LM head)."""
-        return self.base.model
+    def hybrid(self) -> bool:
+        """Whether the model is a Qwen3.5 hybrid (see :mod:`.hybrid`)."""
+        return is_hybrid(self.base.config)
+
+    @property
+    def core(self) -> Any:
+        """Inner model (vision tower + language model, no LM head).
+
+        ``Qwen2VLModel``, or for Qwen3.5 a :class:`~.hybrid.HybridCore`
+        around ``Qwen3_5Model`` that keeps branches isolated.
+        """
+        return HybridCore(self.base.model) if self.hybrid else self.base.model
 
     @property
     def lm_head(self) -> torch.nn.Module:

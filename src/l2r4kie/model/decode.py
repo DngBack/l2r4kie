@@ -217,6 +217,8 @@ def decode_prefix(extractor: Extractor, prefix: Mapping[str, torch.Tensor], requ
         return []
     stop = extractor.config.early_stop if early_stop is None else early_stop
     if extractor.config.fast_decode:
+        if extractor.hybrid:
+            raise ValueError('fast_decode is not implemented for hybrid (Qwen3.5) models')
         from .fast_decode import fast_decode_prefix
 
         return fast_decode_prefix(extractor, prefix, requests, limit, trace, tuple(layers), stop)

@@ -136,7 +136,8 @@ class KevFormat:
 
         Returns:
             Processor outputs: ``input_ids``, ``attention_mask``,
-            ``pixel_values`` and ``image_grid_thw``.
+            ``pixel_values`` and ``image_grid_thw`` (and ``mm_token_type_ids``
+            for Qwen3.5).
         """
         from PIL import Image
 
@@ -144,7 +145,9 @@ class KevFormat:
         for path in pages:
             with Image.open(path) as image:
                 images.append(image.convert('RGB'))
-        text = processor.apply_chat_template(self.prefix_messages(images), tokenize=False, add_generation_prompt=True)
+        # enable_thinking=False: Qwen3.5 otherwise opens a <think> block (Qwen2-VL's template ignores it).
+        text = processor.apply_chat_template(self.prefix_messages(images), tokenize=False, add_generation_prompt=True,
+                                             enable_thinking=False)
         return dict(processor(text=[text], images=images, return_tensors='pt'))
 
     # ---------------------------------------------------------------- branches
@@ -200,7 +203,7 @@ class KevFormat:
 
 
 def load_processor(model_name: str, max_pixels: int = DEFAULT_MAX_PIXELS, **kwargs: Any) -> Any:
-    """Load the Qwen2-VL processor with the page pixel bounds used in training.
+    """Load the Qwen2-VL or Qwen3.5 processor with the page pixel bounds used in training.
 
     Extra keyword arguments (e.g. ``local_files_only``) go to ``from_pretrained``.
     """

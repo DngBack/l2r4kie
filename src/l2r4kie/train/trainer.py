@@ -35,7 +35,7 @@ from ..data.types import Document, FieldRequest
 from ..eval.comparator import correct
 from ..eval.errors import is_coordinates
 from ..model.decode import extract
-from ..model.extractor import Extractor
+from ..model.extractor import Extractor, load_base
 from ..model.format import EncodedBranch, KevFormat, load_processor
 from ..model.packing import pack, prefix_positions
 from ..utils.io import read_jsonl, write_json
@@ -54,7 +54,7 @@ def build_model(config: TrainConfig, adapter: Path | str | None = None, base: to
         config: Run config.
         adapter: Existing adapter directory to continue training (a snapshot's
             ``adapter/`` or ``init_adapter``); ``None`` creates a fresh LoRA.
-        base: Base ``Qwen2VLForConditionalGeneration``; loaded from
+        base: Base ``Qwen2VLForConditionalGeneration`` or ``Qwen3_5ForConditionalGeneration``; loaded from
             ``config.model`` when ``None`` (tests pass a tiny model).
         processor: Its processor; loaded when ``None``.
     """
@@ -64,10 +64,7 @@ def build_model(config: TrainConfig, adapter: Path | str | None = None, base: to
     processor = processor if processor is not None else load_processor(config.model, config.format.max_pixels)
     fmt = KevFormat(processor.tokenizer, config.format.close)
     if base is None:
-        from transformers import Qwen2VLForConditionalGeneration
-
-        base = Qwen2VLForConditionalGeneration.from_pretrained(config.model, dtype=settings.dtype,
-                                                               attn_implementation='sdpa')
+        base = load_base(config.model, settings.dtype)
     if adapter is not None:
         path = Path(adapter)
         model = PeftModel.from_pretrained(base, str(path / 'adapter' if (path / 'adapter').is_dir() else path),

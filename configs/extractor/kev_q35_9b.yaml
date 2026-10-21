@@ -1,0 +1,39 @@
+# KevFormat extractor on Qwen3.5-9B with r4's recipe (kev_r4.yaml): 2.1 MP pages,
+# 12 fields per document, LoRA r16/alpha32, lr 1e-4, seed 42, same selection.
+# Differences from r4, all intended:
+# * LoRA also on the Gated DeltaNet projections (in_proj_qkv, in_proj_z,
+#   out_proj): 24 of Qwen3.5's 32 layers are DeltaNet, so q/k/v/o alone would
+#   adapt only the 8 attention layers. The vision tower has none of these names.
+# * Branch isolation runs through l2r4kie.model.hybrid (needs transformers >= 5,
+#   flash-linear-attention, and triton >= 3.7.1 on Hopper).
+model: Qwen/Qwen3.5-9B
+output: artifacts/kev-q35-9b
+device: cuda:0
+precision: bfloat16
+seed: 42
+selection:
+  prepared: artifacts/data
+  seed: 42
+  holdout_percent: 15
+  balanced_forms: true
+format:
+  close: box_end
+  max_value_tokens: 16384
+  max_pixels: 2097152
+lora:
+  r: 16
+  alpha: 32
+  target_modules: [q_proj, k_proj, v_proj, o_proj, in_proj_qkv, in_proj_z, out_proj]
+steps: 1000
+fields_per_document: 12
+lr: 0.0001
+loss_weighting: token
+gradient_checkpointing: true
+log_every: 50
+save_every: 100
+monitor:
+  every: 100
+  splits: [train, dev]
+  documents: 8
+  fields: 12
+  max_value_tokens: 512

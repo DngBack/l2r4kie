@@ -26,7 +26,11 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 import numpy as np
-from transformers.models.gpt2.tokenization_gpt2 import bytes_to_unicode
+
+try:
+    from transformers.models.gpt2.tokenization_gpt2 import bytes_to_unicode
+except ImportError:  # transformers >= 5 (Qwen3.5)
+    from transformers.convert_slow_tokenizer import bytes_to_unicode
 
 _WHITESPACE = frozenset(b' \t\n\r')
 _DIGITS = frozenset(b'0123456789')
